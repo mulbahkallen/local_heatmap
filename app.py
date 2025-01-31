@@ -73,8 +73,8 @@ def search_places_nearby(lat: float, lon: float, keyword: str, target_business: 
     business (target_business) among up to 100 results sorted by distance.
     Returns:
         rank (int or None): The position of the client's business in the results.
-        top_3 (list of dict): The top 3 competitor businesses
-                              with {place_id, name, rating, reviews}.
+        top_3 (list of dict): The first 3 results exactly as returned by the API 
+                              (including the target if it is indeed in top 3).
         client_details (dict or None): Additional info about the client if found.
     """
     location = f"{lat},{lon}"
@@ -92,38 +92,39 @@ def search_places_nearby(lat: float, lon: float, keyword: str, target_business: 
         st.error(f"Request error while searching Places API: {e}")
         return None, [], None
 
-    rank = None
+    # 1) Capture the exact first 3 results (including target if it's in them)
+    top_3_api = results[:3]
     top_3 = []
-    client_details = None
+    for item in top_3_api:
+        top_3.append({
+            'place_id': item.get('place_id', ''),
+            'name': item.get('name', 'Unknown'),
+            'rating': item.get('rating', 'N/A'),
+            'reviews': item.get('user_ratings_total', 'N/A')
+        })
 
-    # Check up to 100 results
+    # 2) Identify rank of the target business (scan up to top 100)
+    rank = None
+    client_details = None
     for idx, result in enumerate(results[:100]):
-        place_id = result.get('place_id')
         name = result.get('name', 'Unknown')
-        lower_name = name.lower()
+        place_id = result.get('place_id')
         rating = result.get('rating', 'N/A')
         reviews = result.get('user_ratings_total', 'N/A')
 
-        # Identify the target business rank
-        if target_business.lower() in lower_name:
-            rank = idx + 1
+        # If we detect the target business
+        if target_business.lower() in name.lower():
+            rank = idx + 1  # position in the sorted-by-distance list
             client_details = {
                 'place_id': place_id,
                 'name': name,
                 'rating': rating,
                 'reviews': reviews
             }
-
-        # For the top 3 (competitors), skip if it's the target
-        if idx < 3 and target_business.lower() not in lower_name:
-            top_3.append({
-                'place_id': place_id,
-                'name': name,
-                'rating': rating,
-                'reviews': reviews
-            })
+            break  # No need to keep searching after we find it
 
     return rank, top_3, client_details
+
 
 
 def get_place_details(place_id: str, api_key: str):
