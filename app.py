@@ -39,17 +39,26 @@ def search_places_api(lat, lon, keyword, client_gbp):
 
     response = requests.get(url)
     if response.status_code != 200:
-        return None
+        return None, []
 
     results = response.json().get('results', [])
     rank = None
+    top_3 = []
 
     for idx, result in enumerate(results[:100]):  # Check up to top 100 results
+        # Check for the target business
         if client_gbp.lower() in result.get('name', '').lower():
             rank = idx + 1
-            break
 
-    return rank
+        # Collect top 3 businesses
+        if idx < 3:
+            top_3.append({
+                'name': result.get('name', 'Unknown'),
+                'rating': result.get('rating', 'N/A'),
+                'reviews': result.get('user_ratings_total', 'N/A')
+            })
+
+    return rank, top_3
 
 # Function to Create the Heatmap
 def create_heatmap(df, center_lat, center_lon):
@@ -64,15 +73,24 @@ def create_heatmap(df, center_lat, center_lon):
         else:
             color = 'orange'  # Moderate visibility
 
+        # Hover text with top 3 businesses
+        hover_text = "<br>".join(
+            [f"{idx + 1}. {biz['name']} ({biz['rating']}⭐, {biz['reviews']} reviews)"
+             for idx, biz in enumerate(row['top_3'])]
+        ) if row['top_3'] else "No businesses found."
+
         # Add point to map
         fig.add_trace(go.Scattermapbox(
             lat=[row['latitude']],
             lon=[row['longitude']],
             mode='markers+text',
-            marker=dict(size=15, color=color),
-            text=[f"Rank: {row['rank']}" if row['rank'] else "Not Found"],
-            hoverinfo='text',
-            showlegend=False  # Remove redundant legend entries
+            marker=dict(size=20, color=color),
+            text=[f"{row['rank']}" if row['rank'] else "X"],  # Show rank inside the point
+            textfont=dict(size=10, color="white"),
+            textposition="middle center",
+            hovertext=hover_text,
+            hoverinfo="text",
+            showlegend=False
         ))
 
     fig.update_layout(
@@ -82,23 +100,6 @@ def create_heatmap(df, center_lat, center_lon):
     )
 
     return fig
-
-# Function to Generate a Growth Report
-def generate_growth_report(df, client_gbp):
-    report = []
-    green_count = df[df['rank'] <= 3].shape[0]
-    orange_count = df[(df['rank'] > 3) & (df['rank'] <= 10)].shape[0]
-    red_count = df[df['rank'].isna() | (df['rank'] > 10)].shape[0]
-
-    report.append(f"✅ **{green_count} areas where {client_gbp} ranks highly (1–3)**.")
-    report.append(f"🟠 **{orange_count} areas where {client_gbp} has moderate visibility (4–10)**.")
-    report.append(f"🔴 **{red_count} areas where {client_gbp} ranks poorly or is not found.**")
-    report.append("### Recommendations:")
-    report.append("- Focus on improving visibility in red and orange zones.")
-    report.append("- Encourage customers to leave reviews to boost credibility.")
-    report.append("- Optimize GBP details (e.g., categories, photos, keywords).")
-
-    return "\n".join(report)
 
 # Streamlit UI
 st.title("📍 Google Business Profile Ranking Heatmap")
@@ -125,8 +126,8 @@ if st.button("🔍 Generate Heatmap"):
 
         # Search rankings for each grid point
         for lat, lon in grid_points:
-            rank = search_places_api(lat, lon, keyword, client_gbp)
-            grid_data.append({'latitude': lat, 'longitude': lon, 'rank': rank})
+            rank, top_3 = search_places_api(lat, lon, keyword, client_gbp)
+            grid_data.append({'latitude': lat, 'longitude': lon, 'rank': rank, 'top_3': top_3})
 
         # Create DataFrame for results
         df = pd.DataFrame(grid_data)
@@ -136,11 +137,7 @@ if st.button("🔍 Generate Heatmap"):
 
         # Display ranking data table
         st.write("### 📊 Ranking Data")
-        st.dataframe(df)
-
-        # Generate growth report
-        st.write("### 📈 Growth Report")
-        st.markdown(generate_growth_report(df, client_gbp))
+        st.dataframe(df[['latitude', 'longitude', 'rank']])
 
         # Option to download ranking data as CSV
         st.download_button(
