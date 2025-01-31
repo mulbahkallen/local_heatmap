@@ -86,7 +86,7 @@ def create_heatmap(df, center_lat, center_lon):
             mode='markers+text',
             marker=dict(size=20, color=color),
             text=[f"{row['rank']}" if row['rank'] else "X"],  # Show rank inside the point
-            textfont=dict(size=10, color="white"),
+            textfont=dict(size=12, color="black", family="Arial Black"),
             textposition="middle center",
             hovertext=hover_text,
             hoverinfo="text",
@@ -100,6 +100,23 @@ def create_heatmap(df, center_lat, center_lon):
     )
 
     return fig
+
+# Function to Generate a Growth Report
+def generate_growth_report(df, client_gbp):
+    report = []
+    green_count = df[df['rank'] <= 3].shape[0]
+    orange_count = df[(df['rank'] > 3) & (df['rank'] <= 10)].shape[0]
+    red_count = df[df['rank'].isna() | (df['rank'] > 10)].shape[0]
+
+    report.append(f"✅ **{green_count} areas where {client_gbp} ranks highly (1–3)**.")
+    report.append(f"🟠 **{orange_count} areas where {client_gbp} has moderate visibility (4–10)**.")
+    report.append(f"🔴 **{red_count} areas where {client_gbp} ranks poorly or is not found.**")
+    report.append("### Recommendations:")
+    report.append("- Focus on improving visibility in red and orange zones.")
+    report.append("- Encourage customers to leave reviews to boost credibility.")
+    report.append("- Optimize GBP details (e.g., categories, photos, keywords).")
+
+    return "\n".join(report)
 
 # Streamlit UI
 st.title("📍 Google Business Profile Ranking Heatmap")
@@ -137,12 +154,18 @@ if st.button("🔍 Generate Heatmap"):
 
         # Display ranking data table
         st.write("### 📊 Ranking Data")
-        st.dataframe(df[['latitude', 'longitude', 'rank']])
+        detailed_df = df.copy()
+        detailed_df['top_3'] = detailed_df['top_3'].apply(lambda x: ", ".join([biz['name'] for biz in x]) if x else "No data")
+        st.dataframe(detailed_df[['latitude', 'longitude', 'rank', 'top_3']])
+
+        # Generate growth report
+        st.write("### 📈 Growth Report")
+        st.markdown(generate_growth_report(df, client_gbp))
 
         # Option to download ranking data as CSV
         st.download_button(
             label="📥 Download Ranking Data",
-            data=df.to_csv(index=False).encode('utf-8'),
+            data=detailed_df.to_csv(index=False).encode('utf-8'),
             file_name="ranking_data.csv",
             mime="text/csv"
         )
