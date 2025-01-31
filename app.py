@@ -41,29 +41,30 @@ def get_lat_long_google(location_name: str):
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
-    Generates a list of (latitude, longitude) pairs in a square grid
-    around the center (center_lat, center_lon).
-    radius_miles: the distance in miles from the center outward.
-    grid_size: how many points on one side of the grid (odd # recommended).
-    The total number of points = grid_size x grid_size.
+    Generate a grid_size x grid_size grid of points within a square
+    bounding box of +/- radius_miles around (center_lat, center_lon).
+
+    If grid_size=4, you get 16 total points.
+    If grid_size=5, you get 25 total points, etc.
     """
     if grid_size < 1:
         return []
 
-    half_grid = grid_size // 2
-    # Approx: 1 degree lat ~ 69 miles
-    lat_step = radius_miles / 69.0 / half_grid if half_grid != 0 else 0
-    # Approx: 1 degree lon ~ 69 * cos(latitude) miles
-    lon_step = radius_miles / (69.0 * np.cos(np.radians(center_lat))) / half_grid if half_grid != 0 else 0
+    # Approximate degrees per mile for latitude and longitude
+    lat_extent = radius_miles / 69.0
+    lon_extent = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
+
+    # Create arrays of size grid_size spaced between [center - extent, center + extent]
+    lat_values = np.linspace(center_lat - lat_extent, center_lat + lat_extent, grid_size)
+    lon_values = np.linspace(center_lon - lon_extent, center_lon + lon_extent, grid_size)
 
     grid_points = []
-    for i in range(-half_grid, half_grid + 1):
-        for j in range(-half_grid, half_grid + 1):
-            lat = center_lat + i * lat_step
-            lon = center_lon + j * lon_step
+    for lat in lat_values:
+        for lon in lon_values:
             grid_points.append((lat, lon))
 
     return grid_points
+
 
 
 def search_places_nearby(lat: float, lon: float, keyword: str, target_business: str, api_key: str):
