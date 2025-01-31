@@ -12,7 +12,13 @@ from bs4 import BeautifulSoup
 # -------------------------------------------------------------------------
 places_api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
 openai_api_key = st.secrets["OPENAI_API_KEY"]
-openai.api_key = openai_api_key
+
+# ❗️IMPORTANT: Create the OpenAI client with your approach:
+if not openai_api_key or not openai_api_key.startswith("sk-"):
+    st.error("🔑 OpenAI API Key is missing or incorrect! Please update it in Streamlit Secrets.")
+    st.stop()
+
+openai_client = openai.OpenAI(api_key=openai_api_key)  # Custom approach per your example
 
 # Initialize Google Maps Client
 gmaps = googlemaps.Client(key=places_api_key)
@@ -266,8 +272,8 @@ def generate_growth_report(df: pd.DataFrame, client_gbp: str):
 def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list) -> str:
     """
     Sends competitor information to ChatGPT for an SEO comparison
-    with the target business (client_gbp).
-    Now using openai.ChatCompletion.create(...) for library >= 0.27.x
+    with the target business (client_gbp), using the "openai_client" approach
+    you showed in your example.
     """
     # Build a summary of competitor details
     competitor_summaries = []
@@ -279,13 +285,11 @@ def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list) -> s
             f"  Rating: {comp.get('rating', 'N/A')} with {comp.get('reviews', '0')} reviews\n"
         )
         if comp.get('website_content'):
-            # Summarize the presence of website text (truncated in scrape)
             summary_str += f"  Website Snippet: {comp.get('website_content')[:200]}...\n"
         competitor_summaries.append(summary_str)
 
     competitor_text = "\n".join(competitor_summaries)
 
-    # Create a system + user prompt for best results
     prompt = f"""
 You are a local SEO consultant. The target business is "{client_gbp}".
 Below is competitor data (addresses, phone, reviews, ratings, snippet from website):
@@ -296,9 +300,9 @@ and local citation strategies.
     """
 
     try:
-        # The new approach in openai>=0.27.0 is openai.ChatCompletion.create(...)
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        # We call your openai_client using .chat.completions.create (like in your example)
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",  # or "gpt-4-turbo" if you have access
             messages=[
                 {"role": "system", "content": "You are a highly skilled local SEO consultant."},
                 {"role": "user", "content": prompt}
@@ -306,9 +310,8 @@ and local citation strategies.
             temperature=0.7,
             max_tokens=700
         )
-        # The rest is the same: get the assistant's message from .choices[0].message.content
         gpt_answer = response.choices[0].message.content
-        return gpt_answer
+        return gpt_answer.strip()
     except Exception as e:
         st.error(f"OpenAI API error: {e}")
         return "Could not analyze competitors with ChatGPT."
@@ -318,6 +321,7 @@ and local citation strategies.
 # 3. Streamlit Main App
 # -------------------------------------------------------------------------
 def main():
+    # Use session_state for competitor IDs so the second button works after re-run
     if "competitor_place_ids" not in st.session_state:
         st.session_state["competitor_place_ids"] = set()
 
