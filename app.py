@@ -341,7 +341,7 @@ def main():
         st.success(f"📍 Address Found: {business_address} (Lat: {center_lat}, Lon: {center_lon})")
 
         # Generate the grid
-        grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size=grid_size)
+        grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
         st.write(f"Using **{len(grid_points)}** grid points (grid_size={grid_size}×{grid_size}).")
 
         # Collect ranking data
