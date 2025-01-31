@@ -64,13 +64,15 @@ def create_heatmap(df, center_lat, center_lon):
         else:
             color = 'orange'  # Moderate visibility
 
+        # Add point to map
         fig.add_trace(go.Scattermapbox(
             lat=[row['latitude']],
             lon=[row['longitude']],
-            mode='markers',
-            marker=dict(size=20, color=color),
-            text=f"Rank: {row['rank']}" if row['rank'] else "Not Found",
-            hoverinfo='text'
+            mode='markers+text',
+            marker=dict(size=15, color=color),
+            text=[f"Rank: {row['rank']}" if row['rank'] else "Not Found"],
+            hoverinfo='text',
+            showlegend=False  # Remove redundant legend entries
         ))
 
     fig.update_layout(
@@ -80,6 +82,23 @@ def create_heatmap(df, center_lat, center_lon):
     )
 
     return fig
+
+# Function to Generate a Growth Report
+def generate_growth_report(df, client_gbp):
+    report = []
+    green_count = df[df['rank'] <= 3].shape[0]
+    orange_count = df[(df['rank'] > 3) & (df['rank'] <= 10)].shape[0]
+    red_count = df[df['rank'].isna() | (df['rank'] > 10)].shape[0]
+
+    report.append(f"✅ **{green_count} areas where {client_gbp} ranks highly (1–3)**.")
+    report.append(f"🟠 **{orange_count} areas where {client_gbp} has moderate visibility (4–10)**.")
+    report.append(f"🔴 **{red_count} areas where {client_gbp} ranks poorly or is not found.**")
+    report.append("### Recommendations:")
+    report.append("- Focus on improving visibility in red and orange zones.")
+    report.append("- Encourage customers to leave reviews to boost credibility.")
+    report.append("- Optimize GBP details (e.g., categories, photos, keywords).")
+
+    return "\n".join(report)
 
 # Streamlit UI
 st.title("📍 Google Business Profile Ranking Heatmap")
@@ -115,9 +134,13 @@ if st.button("🔍 Generate Heatmap"):
         # Display heatmap
         st.plotly_chart(create_heatmap(df, center_lat, center_lon))
 
-        # Display table of rankings
+        # Display ranking data table
         st.write("### 📊 Ranking Data")
         st.dataframe(df)
+
+        # Generate growth report
+        st.write("### 📈 Growth Report")
+        st.markdown(generate_growth_report(df, client_gbp))
 
         # Option to download ranking data as CSV
         st.download_button(
