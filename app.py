@@ -4,10 +4,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import io
-import zipfile
 
-# Load Google Maps API Key securely from Streamlit Secrets
+# Load Google Maps API Key securely from Streamlit secrets
 places_api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
 gmaps = googlemaps.Client(key=places_api_key)
 
@@ -21,76 +19,80 @@ def get_lat_long_google(location_name):
     else:
         return None, None
 
-# Function to Search Google Places API for Competitors
+# Function to Generate a Grid of Points Around a Location
+def generate_square_grid(center_lat, center_lon, radius, grid_size=5):
+    half_grid = grid_size // 2
+    lat_step = radius / 69.0 / grid_size
+    lon_step = radius / (69.0 * np.cos(np.radians(center_lat))) / grid_size
+
+    grid_points = []
+    for i in range(-half_grid, half_grid + 1):
+        for j in range(-half_grid, half_grid + 1):
+            grid_points.append((center_lat + i * lat_step, center_lon + j * lon_step))
+
+    return grid_points
+
+# Function to Search Google Places API for a Specific Business
 def search_places_api(lat, lon, keyword, client_gbp):
     location = f"{lat},{lon}"
     url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={location}&keyword={keyword}&rankby=distance&key={places_api_key}"
 
     response = requests.get(url)
     if response.status_code != 200:
-        return None, []
+        return None
 
     results = response.json().get('results', [])
-    
-    businesses = []
-    client_rank = None
+    rank = None
 
-    for idx, result in enumerate(results[:10]):  # Limit to top 10 results
-        business_name = result.get('name', 'Unknown')
-        business_data = {
-            'rank': idx + 1,
-            'name': business_name,
-            'rating': result.get('rating', 'N/A'),
-            'user_ratings_total': result.get('user_ratings_total', 'N/A'),
-            'vicinity': result.get('vicinity', 'N/A'),
-            'categories': ", ".join(result.get('types', [])),
-            'latitude': result.get('geometry', {}).get('location', {}).get('lat', None),
-            'longitude': result.get('geometry', {}).get('location', {}).get('lng', None)
-        }
-        businesses.append(business_data)
+    for idx, result in enumerate(results[:100]):  # Check up to top 100 results
+        if client_gbp.lower() in result.get('name', '').lower():
+            rank = idx + 1
+            break
 
-        # Check if the client's business is found in the results
-        if client_gbp.lower() in business_name.lower():
-            client_rank = idx + 1  # Rank starts from 1
+    return rank
 
-    return client_rank, businesses
-
-# Function to Create a Plotly Map
-def create_map(df, center_lat, center_lon, client_gbp, client_rank):
+# Function to Create the Heatmap
+def create_heatmap(df, center_lat, center_lon):
     fig = go.Figure()
 
     for _, row in df.iterrows():
-        marker_color = "blue" if row["name"].lower() == client_gbp.lower() else "red"
-        hover_text = f"{row['rank']}: {row['name']} ({row['rating']}⭐ {row['user_ratings_total']} reviews)"
+        # Assign color based on rank
+        if row['rank'] is None or row['rank'] > 10:
+            color = 'red'  # Low visibility
+        elif row['rank'] <= 3:
+            color = 'green'  # High visibility
+        else:
+            color = 'orange'  # Moderate visibility
 
         fig.add_trace(go.Scattermapbox(
-            lat=[row["latitude"]],
-            lon=[row["longitude"]],
-            mode="markers+text",
-            marker=dict(size=15, color=marker_color),
-            text=[str(row["rank"])],
-            hovertext=hover_text,
-            hoverinfo="text"
+            lat=[row['latitude']],
+            lon=[row['longitude']],
+            mode='markers',
+            marker=dict(size=20, color=color),
+            text=f"Rank: {row['rank']}" if row['rank'] else "Not Found",
+            hoverinfo='text'
         ))
 
     fig.update_layout(
         mapbox=dict(style="open-street-map", center=dict(lat=center_lat, lon=center_lon), zoom=12),
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        title=f"Competitor Rankings for '{client_gbp}' ({'Ranked' if client_rank else 'Not Found'})"
+        title="Target Business Ranking Heatmap"
     )
-    
+
     return fig
 
 # Streamlit UI
-st.title("📍 Google Business Profile Rank & Competitor Analysis")
-st.write("Check your business ranking and analyze competitors using Google Places API.")
+st.title("📍 Google Business Profile Ranking Heatmap")
+st.write("Analyze how your business ranks across different grid points using Google Places API.")
 
 # User Inputs
 client_gbp = st.text_input("Enter Your Business Name (Google Business Profile)", "Starbucks")
 keyword = st.text_input("Enter Target Keyword (e.g., 'Coffee Shop')", "Coffee Shop")
 location = st.text_input("Enter Search Location (City or Zip Code)", "Los Angeles, CA")
+radius = st.slider("Select Search Radius (miles)", 1, 10, 5)
+grid_size = st.slider("Select Grid Size", 3, 11, 5)
 
-if st.button("🔍 Analyze Rankings"):
+if st.button("🔍 Generate Heatmap"):
     center_lat, center_lon = get_lat_long_google(location)
 
     if not center_lat or not center_lon:
@@ -98,27 +100,29 @@ if st.button("🔍 Analyze Rankings"):
     else:
         st.success(f"📍 Location Found: {location} ({center_lat}, {center_lon})")
 
-        # Search Google Places API for businesses
-        client_rank, businesses = search_places_api(center_lat, center_lon, keyword, client_gbp)
+        # Generate grid points
+        grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
+        grid_data = []
 
-        if businesses:
-            df = pd.DataFrame(businesses)
-            st.plotly_chart(create_map(df, center_lat, center_lon, client_gbp, client_rank))
+        # Search rankings for each grid point
+        for lat, lon in grid_points:
+            rank = search_places_api(lat, lon, keyword, client_gbp)
+            grid_data.append({'latitude': lat, 'longitude': lon, 'rank': rank})
 
-            # Display results
-            st.write("### 📊 Competitor Rankings")
-            st.dataframe(df[['rank', 'name', 'rating', 'user_ratings_total', 'vicinity']])
+        # Create DataFrame for results
+        df = pd.DataFrame(grid_data)
 
-            # Show client ranking
-            if client_rank:
-                st.success(f"✅ **{client_gbp} is ranked #{client_rank} for '{keyword}' in {location}.**")
-            else:
-                st.warning(f"⚠️ **{client_gbp} was NOT found in the top 10 results for '{keyword}'.**")
+        # Display heatmap
+        st.plotly_chart(create_heatmap(df, center_lat, center_lon))
 
-            # Create a ZIP file for download
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zipf:
-                zipf.writestr("competitor_analysis.csv", df.to_csv(index=False))
+        # Display table of rankings
+        st.write("### 📊 Ranking Data")
+        st.dataframe(df)
 
-            st.download_button("📥 Download Report", zip_buffer.getvalue(), "business_audit.zip", "application/zip")
-
+        # Option to download ranking data as CSV
+        st.download_button(
+            label="📥 Download Ranking Data",
+            data=df.to_csv(index=False).encode('utf-8'),
+            file_name="ranking_data.csv",
+            mime="text/csv"
+        )
