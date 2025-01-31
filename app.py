@@ -107,6 +107,25 @@ def create_heatmap(df, center_lat, center_lon):
 
     return fig
 
+# Function to Generate a Growth Report
+def generate_growth_report(df, client_gbp):
+    """Generate a report highlighting ranking insights and recommendations."""
+    green_count = df[df['rank'] <= 3].shape[0]
+    orange_count = df[(df['rank'] > 3) & (df['rank'] <= 10)].shape[0]
+    red_count = df[df['rank'].isna() | (df['rank'] > 10)].shape[0]
+
+    report = []
+    report.append(f"✅ **{green_count} areas where {client_gbp} ranks highly (1–3)**.")
+    report.append(f"🟠 **{orange_count} areas where {client_gbp} has moderate visibility (4–10)**.")
+    report.append(f"🔴 **{red_count} areas where {client_gbp} ranks poorly or is not found.**")
+    report.append("### Recommendations:")
+    report.append("- Focus on improving visibility in red and orange zones.")
+    report.append("- Encourage customers to leave reviews to boost credibility.")
+    report.append("- Optimize GBP details (e.g., categories, photos, keywords).")
+    report.append("- Engage with users by responding to reviews and updating content.")
+
+    return "\n".join(report)
+
 # Streamlit UI
 st.title("📍 Google Business Profile Ranking Heatmap")
 st.write("Analyze how your business ranks across different grid points using Google Places API.")
