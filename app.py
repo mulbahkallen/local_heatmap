@@ -267,7 +267,7 @@ def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list) -> s
     """
     Sends competitor information to ChatGPT for an SEO comparison
     with the target business (client_gbp).
-    Now uses openai.Chat.create(...) for openai>=1.0.0.
+    Now using openai.ChatCompletion.create(...) for library >= 0.27.x
     """
     # Build a summary of competitor details
     competitor_summaries = []
@@ -296,9 +296,8 @@ and local citation strategies.
     """
 
     try:
-        # NOTE: The new 1.0.0 interface uses `openai.Chat.create(...)` 
-        # instead of `openai.ChatCompletion.create(...)`.
-        response = openai.Chat.create(
+        # The new approach in openai>=0.27.0 is openai.ChatCompletion.create(...)
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a highly skilled local SEO consultant."},
@@ -307,7 +306,7 @@ and local citation strategies.
             temperature=0.7,
             max_tokens=700
         )
-        # The rest is the same: get the assistant's message from .choices[0]
+        # The rest is the same: get the assistant's message from .choices[0].message.content
         gpt_answer = response.choices[0].message.content
         return gpt_answer
     except Exception as e:
