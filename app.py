@@ -267,9 +267,7 @@ def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list) -> s
     """
     Sends competitor information to ChatGPT for an SEO comparison
     with the target business (client_gbp).
-    competitor_details: a list of dicts, each having keys like
-        { 'name', 'rating', 'reviews', 'address', 'phone', 'website_content', ... }
-    Returns the GPT-generated analysis as a string.
+    Now uses openai.Chat.create(...) for openai>=1.0.0.
     """
     # Build a summary of competitor details
     competitor_summaries = []
@@ -298,7 +296,9 @@ and local citation strategies.
     """
 
     try:
-        response = openai.ChatCompletion.create(
+        # NOTE: The new 1.0.0 interface uses `openai.Chat.create(...)` 
+        # instead of `openai.ChatCompletion.create(...)`.
+        response = openai.Chat.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a highly skilled local SEO consultant."},
@@ -307,6 +307,7 @@ and local citation strategies.
             temperature=0.7,
             max_tokens=700
         )
+        # The rest is the same: get the assistant's message from .choices[0]
         gpt_answer = response.choices[0].message.content
         return gpt_answer
     except Exception as e:
@@ -318,7 +319,6 @@ and local citation strategies.
 # 3. Streamlit Main App
 # -------------------------------------------------------------------------
 def main():
-    # Initialize a default for competitor_place_ids in session_state
     if "competitor_place_ids" not in st.session_state:
         st.session_state["competitor_place_ids"] = set()
 
@@ -368,7 +368,7 @@ def main():
                 'client_reviews': client_info['reviews'] if client_info else None
             })
 
-        # Save the competitor data in session_state so it persists
+        # Save the competitor data in session_state
         st.session_state["competitor_place_ids"] = competitor_place_ids
 
         # Create DataFrame
@@ -404,7 +404,7 @@ def main():
             mime="text/csv"
         )
 
-    # After the heatmap is generated, we can reference competitor_place_ids from session_state
+    # Retrieve competitor IDs from session_state for the next button
     competitor_place_ids = st.session_state.get("competitor_place_ids", set())
 
     # --- Gather Detailed Competitor Info (Place Details + Scrape) ---
@@ -431,6 +431,7 @@ def main():
 
                 # Now feed these details to GPT
                 gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_details_list)
+
             st.write("### ChatGPT Competitor Comparison")
             st.write(gpt_analysis)
     else:
