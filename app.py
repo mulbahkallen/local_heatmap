@@ -288,8 +288,8 @@ its local SEO against these competitors.
 # -------------------------------------------------------------------------
 def main():
     st.title("📍 Google Business Profile Ranking Heatmap & Analysis")
-    st.write("Analyze how your business ranks across different grid points using Google Places API.\n"
-             "Then compare competitor profiles using ChatGPT for deeper insights.")
+    st.write("Analyze how your business ranks in your target area.\n"
+             "Then compare competitor profiles using AI for deeper insights.")
 
     # --- User Inputs ---
     client_gbp = st.text_input("Enter Your Business Name (Google Business Profile)", "Starbucks")
