@@ -5,6 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 import openai
+from bs4 import BeautifulSoup
 
 # -------------------------------------------------------------------------
 # 1. Load API Keys from Streamlit Secrets
@@ -20,12 +21,10 @@ gmaps = googlemaps.Client(key=places_api_key)
 # -------------------------------------------------------------------------
 # 2. Define Helper Functions
 # -------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
 def get_lat_long_google(location_name: str):
     """
-    Get the latitude and longitude for a given address/string location 
-    using the Google Maps Geocoding API. 
+    Get the latitude and longitude for a given address/string location
+    using the Google Maps Geocoding API.
     """
     try:
         geocode_result = gmaps.geocode(location_name)
@@ -42,16 +41,20 @@ def get_lat_long_google(location_name: str):
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
-    Generates a list of (latitude, longitude) pairs in a square grid 
+    Generates a list of (latitude, longitude) pairs in a square grid
     around the center (center_lat, center_lon).
-    radius_miles: the distance in miles from the center to extend.
-    grid_size: how many points on one side of the grid (odd number recommended).
+    radius_miles: the distance in miles from the center outward.
+    grid_size: how many points on one side of the grid (odd # recommended).
+    The total number of points = grid_size x grid_size.
     """
+    if grid_size < 1:
+        return []
+
     half_grid = grid_size // 2
     # Approx: 1 degree lat ~ 69 miles
-    lat_step = radius_miles / 69.0 / half_grid  
+    lat_step = radius_miles / 69.0 / half_grid if half_grid != 0 else 0
     # Approx: 1 degree lon ~ 69 * cos(latitude) miles
-    lon_step = radius_miles / (69.0 * np.cos(np.radians(center_lat))) / half_grid
+    lon_step = radius_miles / (69.0 * np.cos(np.radians(center_lat))) / half_grid if half_grid != 0 else 0
 
     grid_points = []
     for i in range(-half_grid, half_grid + 1):
@@ -63,21 +66,14 @@ def generate_square_grid(center_lat: float, center_lon: float, radius_miles: flo
     return grid_points
 
 
-@st.cache_data(show_spinner=False)
-def search_places_api(
-    lat: float,
-    lon: float,
-    keyword: str,
-    target_business: str,
-    api_key: str
-):
+def search_places_nearby(lat: float, lon: float, keyword: str, target_business: str, api_key: str):
     """
-    Uses Google Places Nearby Search to find the rank of a specific 
+    Uses Google Places Nearby Search to find the rank of a specific
     business (target_business) among up to 100 results sorted by distance.
     Returns:
         rank (int or None): The position of the client's business in the results.
-        top_3 (list of dict): The top 3 competitor businesses 
-                              with {name, rating, reviews}.
+        top_3 (list of dict): The top 3 competitor businesses
+                              with {place_id, name, rating, reviews}.
         client_details (dict or None): Additional info about the client if found.
     """
     location = f"{lat},{lon}"
@@ -101,29 +97,82 @@ def search_places_api(
 
     # Check up to 100 results
     for idx, result in enumerate(results[:100]):
-        business_name = result.get('name', 'Unknown').lower()
+        place_id = result.get('place_id')
+        name = result.get('name', 'Unknown')
+        lower_name = name.lower()
         rating = result.get('rating', 'N/A')
         reviews = result.get('user_ratings_total', 'N/A')
-        
-        # Collect top 3 for competitor insight (exclude if it's the target business)
-        if idx < 3:
-            if target_business.lower() not in business_name:
-                top_3.append({
-                    'name': result.get('name', 'Unknown'),
-                    'rating': rating,
-                    'reviews': reviews
-                })
 
         # Identify the target business rank
-        if target_business.lower() in business_name:
+        if target_business.lower() in lower_name:
             rank = idx + 1
             client_details = {
-                'name': result.get('name', ''),
+                'place_id': place_id,
+                'name': name,
                 'rating': rating,
                 'reviews': reviews
             }
 
+        # For the top 3 (competitors), skip if it's the target
+        if idx < 3 and target_business.lower() not in lower_name:
+            top_3.append({
+                'place_id': place_id,
+                'name': name,
+                'rating': rating,
+                'reviews': reviews
+            })
+
     return rank, top_3, client_details
+
+
+def get_place_details(place_id: str, api_key: str):
+    """
+    Fetch additional details about a place using the Google Places Details API.
+    Returns a dict with fields like {address, phone, website, etc.}
+    """
+    url = (
+        "https://maps.googleapis.com/maps/api/place/details/json"
+        f"?place_id={place_id}&key={api_key}"
+    )
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        result = response.json().get('result', {})
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching place details: {e}")
+        return {}
+
+    return {
+        'address': result.get('formatted_address', ''),
+        'phone': result.get('formatted_phone_number', ''),
+        'website': result.get('website', ''),
+        'name': result.get('name', ''),
+        'rating': result.get('rating', 'N/A'),
+        'reviews': result.get('user_ratings_total', 'N/A')
+    }
+
+
+def scrape_website(url: str, max_chars: int = 2000):
+    """
+    Attempt to scrape a competitor's website to get textual data for AI analysis.
+    Return raw text (limited to max_chars).
+    Note: This may fail if the site blocks scraping or needs JavaScript.
+    """
+    if not url:
+        return ""
+
+    try:
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Grab visible text
+        texts = soup.find_all(["p", "h1", "h2", "h3", "h4", "li"], limit=None)
+        combined = " ".join(t.get_text(separator=" ", strip=True) for t in texts)
+        # Limit the size
+        return combined[:max_chars]
+    except Exception:
+        # Gracefully handle any scraping errors
+        return ""
 
 
 def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
@@ -134,8 +183,6 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
 
     for _, row in df.iterrows():
         rank_val = row['rank']
-        # The marker color can still represent performance if desired.
-        # But the text is explicitly in black per instructions.
         if rank_val is None:
             marker_color = 'red'
             text_label = "X"  # black X if not found
@@ -149,7 +196,6 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
             marker_color = 'red'
             text_label = str(rank_val)
 
-        # Build hover text from top_3 competitor info
         if row['top_3']:
             hover_items = []
             for i, biz in enumerate(row['top_3']):
@@ -192,27 +238,17 @@ def generate_growth_report(df: pd.DataFrame, client_gbp: str):
     """
     Generate a textual report highlighting:
     - Number of grid points in top 3, top 10, or not found.
-    - Percent of grid points in top 3 and top 10.
+    - Percentage of grid points in top 3 and top 10.
     - Average rank.
     """
     total_points = len(df)
+    df_found = df.dropna(subset=['rank'])  # Only points where business is found
 
-    # Where the business is actually found
-    df_found = df.dropna(subset=['rank'])
-
-    # Number of grid points in top 3
     top_3_points = df_found[df_found['rank'] <= 3].shape[0]
-    # Number in top 10
     top_10_points = df_found[df_found['rank'] <= 10].shape[0]
 
-    # Percentages
     pct_top_3 = 100.0 * top_3_points / total_points if total_points else 0
     pct_top_10 = 100.0 * top_10_points / total_points if total_points else 0
-
-    # Summaries for green/orange/red
-    green_count = top_3_points
-    orange_count = df_found[(df_found['rank'] > 3) & (df_found['rank'] <= 10)].shape[0]
-    red_count = total_points - (green_count + orange_count)
 
     average_rank = df_found['rank'].mean() if not df_found.empty else None
 
@@ -223,58 +259,53 @@ def generate_growth_report(df: pd.DataFrame, client_gbp: str):
         f"- **In Top 3:** {top_3_points} points ({pct_top_3:.1f}% of total)",
         f"- **In Top 10:** {top_10_points} points ({pct_top_10:.1f}% of total)",
         f"- **Average Rank (where found):** {average_rank:.2f}" if average_rank else "- Average Rank: N/A",
-        "",
-        f"✅ **{green_count} areas** (rank 1–3).",
-        f"🟠 **{orange_count} areas** (rank 4–10).",
-        f"🔴 **{red_count} areas** (rank > 10 or not found).",
-        "",
-        "### Recommendations:",
-        "- Improve presence in Red/Orange zones with local SEO tactics (on-page, link building, citations).",
-        "- Encourage reviews to boost trust & ranking signals for localized searches.",
-        "- Keep GBP (Google Business Profile) updated with new photos, Q&A, and posts."
     ]
-
     return "\n".join(lines)
 
 
-def analyze_competitors_with_gpt(client_gbp: str, competitor_df: pd.DataFrame) -> str:
+def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list) -> str:
     """
     Sends competitor information to ChatGPT for an SEO comparison
     with the target business (client_gbp).
-    competitor_df must have columns: 'name', 'rating', 'reviews', 
-    plus any others you'd like to feed in.
+    competitor_details: a list of dicts, each having keys like
+        { 'name', 'rating', 'reviews', 'address', 'phone', 'website_content', ... }
     Returns the GPT-generated analysis as a string.
     """
     # Build a summary of competitor details
     competitor_summaries = []
-    for _, row in competitor_df.iterrows():
-        name = row['name']
-        rating = row['rating']
-        reviews = row['reviews']
-        competitor_summaries.append(f"- {name}: {rating} stars, {reviews} reviews")
+    for comp in competitor_details:
+        summary_str = (
+            f"- Name: {comp.get('name', 'N/A')}\n"
+            f"  Address: {comp.get('address', 'N/A')}\n"
+            f"  Phone: {comp.get('phone', 'N/A')}\n"
+            f"  Rating: {comp.get('rating', 'N/A')} with {comp.get('reviews', '0')} reviews\n"
+        )
+        if comp.get('website_content'):
+            # Summarize the presence of website text (truncated in scrape)
+            summary_str += f"  Website Snippet: {comp.get('website_content')[:200]}...\n"
+        competitor_summaries.append(summary_str)
 
-    # Turn them into a single prompt block
     competitor_text = "\n".join(competitor_summaries)
 
+    # Create a system + user prompt for best results
     prompt = f"""
-You are a local SEO specialist. You have a target business named "{client_gbp}".
-Here is a list of local competitor businesses, along with their rating and number of reviews:
-
+You are a local SEO consultant. The target business is "{client_gbp}".
+Below is competitor data (addresses, phone, reviews, ratings, snippet from website):
 {competitor_text}
-
-Based on the above data, how do these competitors compare to "{client_gbp}" in terms of
-online presence? Provide specific recommendations for "{client_gbp}" to improve
-its local SEO against these competitors.
+Provide a comparison and specific SEO recommendations for "{client_gbp}" to improve 
+its local presence. Consider GMB/GBP optimization, website improvements, 
+and local citation strategies.
     """
 
     try:
-        # ChatCompletion with the openai API
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a helpful SEO consultant."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a highly skilled local SEO consultant."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=700
         )
         gpt_answer = response.choices[0].message.content
         return gpt_answer
@@ -296,7 +327,7 @@ def main():
     keyword = st.text_input("Enter Target Keyword (e.g., 'Coffee Shop')", "Coffee Shop")
     business_address = st.text_input("Enter Your Business Address (Full Address)", "Los Angeles, CA")
     radius = st.slider("Select Search Radius (miles)", 1, 20, 5)
-    grid_size = st.slider("Select Grid Size", 3, 11, 5)
+    grid_size = st.slider("Select Grid Size (total points = grid_size^2)", 3, 11, 5)
 
     # --- Generate Heatmap when button clicked ---
     if st.button("🔍 Generate Heatmap"):
@@ -307,18 +338,22 @@ def main():
             return
 
         st.success(f"📍 Address Found: {business_address} (Lat: {center_lat}, Lon: {center_lon})")
-        
+
         # Generate the grid
         grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size=grid_size)
+        st.write(f"Using **{len(grid_points)}** grid points (grid_size={grid_size}×{grid_size}).")
 
         # Collect ranking data
         grid_data = []
-        all_competitors = []  # We will collect competitor data here for ChatGPT analysis
+        competitor_place_ids = set()
 
         for lat, lon in grid_points:
-            rank, top_3, client_info = search_places_api(lat, lon, keyword, client_gbp, places_api_key)
-            # Add competitor info to a global list (if any top_3 is found)
-            all_competitors.extend(top_3)
+            rank, top_3, client_info = search_places_nearby(
+                lat, lon, keyword, client_gbp, places_api_key
+            )
+            # Gather competitor place_ids for further details
+            for c in top_3:
+                competitor_place_ids.add(c['place_id'])
 
             grid_data.append({
                 'latitude': lat,
@@ -332,20 +367,24 @@ def main():
 
         # Create DataFrame
         df = pd.DataFrame(grid_data)
-        
+
         # --- Display Heatmap ---
         st.plotly_chart(create_heatmap(df, center_lat, center_lon), use_container_width=True)
 
-        # --- Show Table of Results ---
-        st.write("### 📊 Ranking Data")
-        df['top_3_summary'] = df['top_3'].apply(
-            lambda comps: ", ".join([f"{biz['name']} ({biz['reviews']} reviews)"
-                                     for biz in comps]) if comps else "No data"
-        )
-
-        st.dataframe(
-            df[['latitude', 'longitude', 'rank', 'client_rating', 'client_reviews', 'top_3_summary']]
-        )
+        # --- Show a Cleaner Table of Results ---
+        st.write("### 📊 Ranking Data (Summary)")
+        # We'll display it as bullet points for each row
+        for i, row in df.iterrows():
+            rank_str = str(row['rank']) if row['rank'] else "X"
+            top3_text = ""
+            for comp_idx, comp in enumerate(row['top_3'], start=1):
+                top3_text += f"\n   {comp_idx}. {comp['name']} ({comp['rating']}⭐, {comp['reviews']} reviews)"
+            st.markdown(f"""
+**Grid Point {i+1}**  
+- Location: ({row['latitude']:.5f}, {row['longitude']:.5f})  
+- Rank of {client_gbp}: {rank_str}  
+- Top 3 Competitors: {top3_text if top3_text else "None"}
+            """)
 
         # --- Growth / SEO Report ---
         st.write("### 📈 Growth Report")
@@ -360,20 +399,30 @@ def main():
             mime="text/csv"
         )
 
-        # --- ChatGPT Competitor Analysis ---
-        # Convert all_competitors into a unique DataFrame 
-        # so we don't feed duplicate competitor entries multiple times.
-        if all_competitors:
-            competitor_df = pd.DataFrame(all_competitors)
-            # Some businesses might appear multiple times in different grid points. 
-            # We can group by name, taking the highest review count, or average rating, etc.
-            # For simplicity, let’s keep the first appearance or deduplicate by name:
-            competitor_df.drop_duplicates(subset=["name"], keep="first", inplace=True)
-
-            # Let the user decide if they want to analyze competitor data with ChatGPT
+        # --- Gather Detailed Competitor Info (Place Details + Scrape) ---
+        if competitor_place_ids:
             if st.button("Analyze Competitors with ChatGPT"):
-                with st.spinner("Analyzing competitor data..."):
-                    gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_df)
+                with st.spinner("Fetching competitor details & scraping websites..."):
+                    competitor_details_list = []
+                    for pid in competitor_place_ids:
+                        details = get_place_details(pid, places_api_key)
+                        # Attempt to scrape website for textual info
+                        website_content = ""
+                        if details.get('website'):
+                            website_content = scrape_website(details['website'], max_chars=2000)
+
+                        competitor_details_list.append({
+                            'name': details.get('name', ''),
+                            'address': details.get('address', ''),
+                            'phone': details.get('phone', ''),
+                            'rating': details.get('rating', 'N/A'),
+                            'reviews': details.get('reviews', '0'),
+                            'website': details.get('website', ''),
+                            'website_content': website_content
+                        })
+
+                    # Now feed these details to GPT
+                    gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_details_list)
                 st.write("### ChatGPT Competitor Comparison")
                 st.write(gpt_analysis)
         else:
