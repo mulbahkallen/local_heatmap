@@ -66,7 +66,6 @@ def generate_square_grid(center_lat: float, center_lon: float, radius_miles: flo
     return grid_points
 
 
-
 def search_places_nearby(lat: float, lon: float, keyword: str, target_business: str, api_key: str):
     """
     Uses Google Places Nearby Search to find the rank of a specific
@@ -124,7 +123,6 @@ def search_places_nearby(lat: float, lon: float, keyword: str, target_business: 
             break  # No need to keep searching after we find it
 
     return rank, top_3, client_details
-
 
 
 def get_place_details(place_id: str, api_key: str):
@@ -320,6 +318,10 @@ and local citation strategies.
 # 3. Streamlit Main App
 # -------------------------------------------------------------------------
 def main():
+    # Initialize a default for competitor_place_ids in session_state
+    if "competitor_place_ids" not in st.session_state:
+        st.session_state["competitor_place_ids"] = set()
+
     st.title("📍 Google Business Profile Ranking Heatmap & Analysis")
     st.write("Analyze how your business ranks in your target area.\n"
              "Then compare competitor profiles using AI for deeper insights.")
@@ -334,7 +336,6 @@ def main():
     # --- Generate Heatmap when button clicked ---
     if st.button("🔍 Generate Heatmap"):
         center_lat, center_lon = get_lat_long_google(business_address)
-
         if not center_lat or not center_lon:
             st.error("❌ Could not find the address. Please try again.")
             return
@@ -367,6 +368,9 @@ def main():
                 'client_reviews': client_info['reviews'] if client_info else None
             })
 
+        # Save the competitor data in session_state so it persists
+        st.session_state["competitor_place_ids"] = competitor_place_ids
+
         # Create DataFrame
         df = pd.DataFrame(grid_data)
 
@@ -375,7 +379,6 @@ def main():
 
         # --- Show a Cleaner Table of Results ---
         st.write("### 📊 Ranking Data (Summary)")
-        # We'll display it as bullet points for each row
         for i, row in df.iterrows():
             rank_str = str(row['rank']) if row['rank'] else "X"
             top3_text = ""
@@ -401,34 +404,37 @@ def main():
             mime="text/csv"
         )
 
-        # --- Gather Detailed Competitor Info (Place Details + Scrape) ---
-        if competitor_place_ids:
-            if st.button("Analyze Competitors with ChatGPT"):
-                with st.spinner("Fetching competitor details & scraping websites..."):
-                    competitor_details_list = []
-                    for pid in competitor_place_ids:
-                        details = get_place_details(pid, places_api_key)
-                        # Attempt to scrape website for textual info
-                        website_content = ""
-                        if details.get('website'):
-                            website_content = scrape_website(details['website'], max_chars=2000)
+    # After the heatmap is generated, we can reference competitor_place_ids from session_state
+    competitor_place_ids = st.session_state.get("competitor_place_ids", set())
 
-                        competitor_details_list.append({
-                            'name': details.get('name', ''),
-                            'address': details.get('address', ''),
-                            'phone': details.get('phone', ''),
-                            'rating': details.get('rating', 'N/A'),
-                            'reviews': details.get('reviews', '0'),
-                            'website': details.get('website', ''),
-                            'website_content': website_content
-                        })
+    # --- Gather Detailed Competitor Info (Place Details + Scrape) ---
+    if competitor_place_ids:
+        if st.button("Analyze Competitors with ChatGPT"):
+            with st.spinner("Fetching competitor details & scraping websites..."):
+                competitor_details_list = []
+                for pid in competitor_place_ids:
+                    details = get_place_details(pid, places_api_key)
+                    # Attempt to scrape website for textual info
+                    website_content = ""
+                    if details.get('website'):
+                        website_content = scrape_website(details['website'], max_chars=2000)
 
-                    # Now feed these details to GPT
-                    gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_details_list)
-                st.write("### ChatGPT Competitor Comparison")
-                st.write(gpt_analysis)
-        else:
-            st.info("No competitor data found to analyze with ChatGPT.")
+                    competitor_details_list.append({
+                        'name': details.get('name', ''),
+                        'address': details.get('address', ''),
+                        'phone': details.get('phone', ''),
+                        'rating': details.get('rating', 'N/A'),
+                        'reviews': details.get('reviews', '0'),
+                        'website': details.get('website', ''),
+                        'website_content': website_content
+                    })
+
+                # Now feed these details to GPT
+                gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_details_list)
+            st.write("### ChatGPT Competitor Comparison")
+            st.write(gpt_analysis)
+    else:
+        st.info("No competitor data found to analyze with ChatGPT.")
 
 
 if __name__ == "__main__":
