@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import openai  # for ChatGPT calls
+import openai
 
 # -------------------------------------------------------------------------
 # 1. Load API Keys from Streamlit Secrets
