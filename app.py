@@ -66,12 +66,18 @@ def create_heatmap(df, center_lat, center_lon):
 
     for _, row in df.iterrows():
         # Assign color based on rank
-        if row['rank'] is None or row['rank'] > 10:
-            color = 'red'  # Low visibility
+        if row['rank'] is None:
+            color = 'red'  # No ranking
+            text = "X"  # Display "X" for no rank
         elif row['rank'] <= 3:
             color = 'green'  # High visibility
-        else:
+            text = f"{row['rank']}"
+        elif row['rank'] <= 10:
             color = 'orange'  # Moderate visibility
+            text = f"{row['rank']}"
+        else:
+            color = 'red'  # Low visibility
+            text = f"{row['rank']}"
 
         # Hover text with top 3 businesses
         hover_text = "<br>".join(
@@ -85,7 +91,7 @@ def create_heatmap(df, center_lat, center_lon):
             lon=[row['longitude']],
             mode='markers+text',
             marker=dict(size=20, color=color),
-            text=[f"{row['rank']}" if row['rank'] else "X"],  # Show rank inside the point
+            text=[text],  # Display rank or "X"
             textfont=dict(size=12, color="black", family="Arial Black"),
             textposition="middle center",
             hovertext=hover_text,
@@ -101,23 +107,6 @@ def create_heatmap(df, center_lat, center_lon):
 
     return fig
 
-# Function to Generate a Growth Report
-def generate_growth_report(df, client_gbp):
-    report = []
-    green_count = df[df['rank'] <= 3].shape[0]
-    orange_count = df[(df['rank'] > 3) & (df['rank'] <= 10)].shape[0]
-    red_count = df[df['rank'].isna() | (df['rank'] > 10)].shape[0]
-
-    report.append(f"✅ **{green_count} areas where {client_gbp} ranks highly (1–3)**.")
-    report.append(f"🟠 **{orange_count} areas where {client_gbp} has moderate visibility (4–10)**.")
-    report.append(f"🔴 **{red_count} areas where {client_gbp} ranks poorly or is not found.**")
-    report.append("### Recommendations:")
-    report.append("- Focus on improving visibility in red and orange zones.")
-    report.append("- Encourage customers to leave reviews to boost credibility.")
-    report.append("- Optimize GBP details (e.g., categories, photos, keywords).")
-
-    return "\n".join(report)
-
 # Streamlit UI
 st.title("📍 Google Business Profile Ranking Heatmap")
 st.write("Analyze how your business ranks across different grid points using Google Places API.")
@@ -125,17 +114,17 @@ st.write("Analyze how your business ranks across different grid points using Goo
 # User Inputs
 client_gbp = st.text_input("Enter Your Business Name (Google Business Profile)", "Starbucks")
 keyword = st.text_input("Enter Target Keyword (e.g., 'Coffee Shop')", "Coffee Shop")
-location = st.text_input("Enter Search Location (City or Zip Code)", "Los Angeles, CA")
+business_address = st.text_input("Enter Your Business Address (Full Address)", "Los Angeles, CA")
 radius = st.slider("Select Search Radius (miles)", 1, 10, 5)
 grid_size = st.slider("Select Grid Size", 3, 11, 5)
 
 if st.button("🔍 Generate Heatmap"):
-    center_lat, center_lon = get_lat_long_google(location)
+    center_lat, center_lon = get_lat_long_google(business_address)
 
     if not center_lat or not center_lon:
-        st.error("❌ Could not find the location. Please try again.")
+        st.error("❌ Could not find the address. Please try again.")
     else:
-        st.success(f"📍 Location Found: {location} ({center_lat}, {center_lon})")
+        st.success(f"📍 Address Found: {business_address} ({center_lat}, {center_lon})")
 
         # Generate grid points
         grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
