@@ -386,7 +386,7 @@ def main():
             if openai_key_input and google_key_input:
                 st.session_state["openai_api_key"] = openai_key_input
                 st.session_state["places_api_key"] = google_key_input
-                st.experimental_rerun()
+                #st.experimental_rerun()
             else:
                 st.warning("Please provide both API keys before proceeding.")
         st.stop()
