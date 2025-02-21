@@ -9,42 +9,8 @@ from bs4 import BeautifulSoup
 import time
 
 # -------------------------------------------------------------------------
-# 1. Load API Keys from Streamlit Secrets
+# 1. Define Helper Functions (including the NEW circular grid generator)
 # -------------------------------------------------------------------------
-places_api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
-openai_api_key = st.secrets["OPENAI_API_KEY"]
-
-if not openai_api_key or not openai_api_key.startswith("sk-"):
-    st.error("🔑 OpenAI API Key is missing or incorrect! Please update it in Streamlit Secrets.")
-    st.stop()
-
-# Create OpenAI client like in your working snippet
-openai_client = openai.OpenAI(api_key=openai_api_key)
-
-# Initialize Google Maps Client
-gmaps = googlemaps.Client(key=places_api_key)
-
-
-# -------------------------------------------------------------------------
-# 2. Define Helper Functions
-# -------------------------------------------------------------------------
-def get_lat_long_google(location_name: str):
-    """
-    Get latitude and longitude for a given address/string location
-    using the Google Maps Geocoding API.
-    """
-    try:
-        geocode_result = gmaps.geocode(location_name)
-        if geocode_result:
-            lat = geocode_result[0]['geometry']['location']['lat']
-            lon = geocode_result[0]['geometry']['location']['lng']
-            return lat, lon
-        else:
-            return None, None
-    except Exception as e:
-        st.error(f"Error with Geocoding API: {e}")
-        return None, None
-
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
@@ -68,6 +34,39 @@ def generate_square_grid(center_lat: float, center_lon: float, radius_miles: flo
     for lat in lat_values:
         for lon in lon_values:
             grid_points.append((lat, lon))
+
+    return grid_points
+
+
+def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: float, num_points: int = 25):
+    """
+    Generate approximately 'num_points' lat/lon coordinates in a circular
+    pattern around (center_lat, center_lon) within 'radius_miles'.
+
+    This is useful for a scenario where the business may be on the edge
+    or corner of a city, so we only sample within a circular boundary
+    rather than a full square bounding box.
+    """
+    if num_points < 1:
+        return []
+
+    # Convert miles to degrees for lat (roughly ~69 miles per deg)
+    # For lon, we factor in cos(latitude).
+    lat_degs = radius_miles / 69.0
+    lon_degs = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
+
+    # We will spread the points around the circle:
+    # We'll place them in equal angular steps from 0..360 deg.
+    grid_points = []
+    for i in range(num_points):
+        angle = 2.0 * np.pi * (i / num_points)
+        # random or evenly spaced radius could be used; here we keep everything at the boundary
+        # or do a mix of rings. For simplicity, let's just do one ring:
+        lat_offset = lat_degs * np.sin(angle)
+        lon_offset = lon_degs * np.cos(angle)
+        lat = center_lat + lat_offset
+        lon = center_lon + lon_offset
+        grid_points.append((lat, lon))
 
     return grid_points
 
@@ -127,6 +126,10 @@ def search_places_top3_by_rating(lat: float, lon: float, keyword: str, target_bu
         place_id = place.get("place_id", "")
         rating = place.get("rating", 0)
         reviews = place.get("user_ratings_total", 0)
+        types_ = place.get("types", [])  # categories
+        open_now = place.get("opening_hours", {}).get("open_now", None)
+        business_status = place.get("business_status", None)
+
         # If rating is None, treat as 0
         if rating is None:
             rating = 0
@@ -138,6 +141,9 @@ def search_places_top3_by_rating(lat: float, lon: float, keyword: str, target_bu
             "name": name,
             "rating": float(rating) if isinstance(rating, (int, float)) else 0.0,
             "reviews": int(reviews) if isinstance(reviews, int) else 0,
+            "types": types_,
+            "open_now": open_now,
+            "business_status": business_status
         })
 
     # Sort by rating desc, then reviews desc, then name asc
@@ -230,11 +236,18 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
         if row['top_3']:
             hover_items = []
             for i, biz in enumerate(row['top_3']):
+                # Enrich hover with 'types', 'open_now', 'business_status'
+                cats = ", ".join(biz.get("types", []))
+                status = biz.get("business_status", "Unknown")
+                open_status = biz.get("open_now", None)
+                open_str = "Open now" if open_status else ("Closed now" if open_status is False else "Unknown")
                 hover_items.append(
                     f"{i+1}. {biz['name']} "
-                    f"({biz['rating']}⭐, {biz['reviews']} reviews)"
+                    f"({biz['rating']}⭐, {biz['reviews']} reviews)<br>"
+                    f"Types: {cats}<br>"
+                    f"Status: {status} - {open_str}"
                 )
-            hover_text = "<br>".join(hover_items)
+            hover_text = "<br><br>".join(hover_items)
         else:
             hover_text = "No competitor data."
 
@@ -340,7 +353,8 @@ Provide a deep, data-driven, actionable analysis:
     """
 
     try:
-        response = openai_client.chat.completions.create(
+        # Just set openai.api_key once, in main() - but here we rely on it being set
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a highly skilled local SEO consultant."},
@@ -357,9 +371,30 @@ Provide a deep, data-driven, actionable analysis:
 
 
 # -------------------------------------------------------------------------
-# 3. Streamlit Main App
+# 2. Streamlit Main App
 # -------------------------------------------------------------------------
 def main():
+    st.title("📍 Google Business Profile Ranking Heatmap & Analysis")
+
+    # First step: Ask for API keys
+    # We'll store them in session_state so the user only has to input them once.
+    if "openai_api_key" not in st.session_state or "places_api_key" not in st.session_state:
+        st.subheader("Enter Your API Keys")
+        openai_key_input = st.text_input("OpenAI API Key (sk-...)", type="password")
+        google_key_input = st.text_input("Google Maps/Places API Key", type="password")
+        if st.button("Save API Keys"):
+            if openai_key_input and google_key_input:
+                st.session_state["openai_api_key"] = openai_key_input
+                st.session_state["places_api_key"] = google_key_input
+                st.experimental_rerun()
+            else:
+                st.warning("Please provide both API keys before proceeding.")
+        st.stop()
+
+    # Now we have the keys in session_state, set them for usage
+    openai.api_key = st.session_state["openai_api_key"]
+    gmaps = googlemaps.Client(key=st.session_state["places_api_key"])
+
     # Ensure competitor data persists across script runs
     if "competitor_place_ids" not in st.session_state:
         st.session_state["competitor_place_ids"] = set()
@@ -367,7 +402,6 @@ def main():
     if "client_info" not in st.session_state:
         st.session_state["client_info"] = {}
 
-    st.title("📍 Google Business Profile Ranking Heatmap & Analysis")
     st.write("Analyze how your business ranks (by rating) in your target area.\n"
              "Then compare competitor profiles using AI for deeper, data-driven insights.")
 
@@ -375,12 +409,31 @@ def main():
     client_gbp = st.text_input("Enter Your Business Name (Google Business Profile)", "Starbucks")
     keyword = st.text_input("Enter Target Keyword (e.g., 'Coffee Shop')", "Coffee Shop")
     business_address = st.text_input("Enter Your Business Address (Full Address)", "Los Angeles, CA")
+
+    # NEW: let the user select grid shape
+    grid_shape = st.selectbox("Select Grid Shape", ["Square", "Circle"])
     radius = st.slider("Select Search Radius (miles)", 1, 20, 5)
-    grid_size = st.slider("Select Grid Size (total points = grid_size^2)", 3, 11, 5)
+
+    if grid_shape == "Square":
+        grid_size = st.slider("Select Square Grid Size (grid points = size^2)", 3, 11, 5)
+    else:
+        # For circle, we just pick how many points on the ring
+        grid_size = st.slider("Number of Points in the Circle", 8, 60, 25)
 
     # --- Generate Heatmap when button clicked ---
     if st.button("🔍 Generate Heatmap"):
-        center_lat, center_lon = get_lat_long_google(business_address)
+        # Geocode to get lat/lon
+        try:
+            geocode_result = gmaps.geocode(business_address)
+            if geocode_result:
+                center_lat = geocode_result[0]['geometry']['location']['lat']
+                center_lon = geocode_result[0]['geometry']['location']['lng']
+            else:
+                center_lat, center_lon = None, None
+        except Exception as e:
+            st.error(f"Error with Geocoding API: {e}")
+            center_lat, center_lon = None, None
+
         if not center_lat or not center_lon:
             st.error("❌ Could not find the address. Please try again.")
             return
@@ -388,8 +441,12 @@ def main():
         st.success(f"📍 Address Found: {business_address} (Lat: {center_lat}, Lon: {center_lon})")
 
         # Generate the grid
-        grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
-        st.write(f"Using **{len(grid_points)}** grid points (grid_size={grid_size}×{grid_size}).")
+        if grid_shape == "Square":
+            grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
+            st.write(f"Using **{len(grid_points)}** grid points (square grid: {grid_size}×{grid_size}).")
+        else:
+            grid_points = generate_circular_grid(center_lat, center_lon, radius, grid_size)
+            st.write(f"Using **{len(grid_points)}** grid points in a circular pattern.")
 
         # Collect ranking data
         grid_data = []
@@ -398,12 +455,11 @@ def main():
 
         for lat, lon in grid_points:
             rank, top_3, client_details = search_places_top3_by_rating(
-                lat, lon, keyword, client_gbp, places_api_key
+                lat, lon, keyword, client_gbp, st.session_state["places_api_key"]
             )
 
-            # If the target business is found, store the place_id, rating, reviews
+            # If the target business is found, store the place_id, rating, reviews, etc.
             if client_details is not None:
-                # Just storing the last found client info in a dictionary
                 client_info_global = client_details
 
             # Collect the top-3 place_ids in a set for later details retrieval
@@ -420,7 +476,7 @@ def main():
         # Save the competitor data in session_state
         st.session_state["competitor_place_ids"] = competitor_place_ids
 
-        # Also store the last known client info (any time we found the business)
+        # Also store the last known client info
         st.session_state["client_info"] = client_info_global
 
         # Create DataFrame
@@ -437,7 +493,10 @@ def main():
             for comp_idx, comp in enumerate(row['top_3'], start=1):
                 top3_text += (
                     f"\n   {comp_idx}. {comp['name']} "
-                    f"(Rating: {comp['rating']}, {comp['reviews']} reviews)"
+                    f"(Rating: {comp['rating']}, {comp['reviews']} reviews) "
+                    f"Types: {', '.join(comp.get('types', []))}, "
+                    f"Status: {comp.get('business_status', 'Unknown')}, "
+                    f"Open Now: {comp.get('open_now', 'Unknown')}"
                 )
             st.markdown(f"""
 **Grid Point {i+1}**  
@@ -469,7 +528,7 @@ def main():
             with st.spinner("Fetching competitor details & scraping websites..."):
                 competitor_details_list = []
                 for pid in competitor_place_ids:
-                    details = get_place_details(pid, places_api_key)
+                    details = get_place_details(pid, st.session_state["places_api_key"])
                     # Attempt to scrape website for textual info
                     website_content = ""
                     if details.get('website'):
