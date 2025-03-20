@@ -4,14 +4,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-import openai
 from bs4 import BeautifulSoup
 import time
 import os
 
-# -------------------------------------------------------------------------
-# 1. Helper Functions (Grid, Places, Analysis)
-# -------------------------------------------------------------------------
+# ------------------------------------------------------------
+# 1. HELPER FUNCTIONS
+# ------------------------------------------------------------
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
@@ -21,7 +20,6 @@ def generate_square_grid(center_lat: float, center_lon: float, radius_miles: flo
     if grid_size < 1:
         return []
 
-    # ~69 miles per degree latitude, vary for longitude
     lat_extent = radius_miles / 69.0
     lon_extent = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
 
@@ -58,8 +56,8 @@ def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: f
 
 def fetch_nearby_places(lat: float, lon: float, keyword: str, api_key: str):
     """
-    Collect up to 60 results (3 pages) from the Google Places Nearby Search,
-    using rankby=distance (i.e. closest first).
+    Collect up to 60 results from the Google Places Nearby Search,
+    using rankby=distance (closest first).
     """
     location = f"{lat},{lon}"
     base_url = (
@@ -70,7 +68,7 @@ def fetch_nearby_places(lat: float, lon: float, keyword: str, api_key: str):
 
     all_results = []
     page_url = base_url
-    for _ in range(3):
+    for _ in range(3):  # up to 3 pages
         try:
             resp = requests.get(page_url)
             resp.raise_for_status()
@@ -84,7 +82,7 @@ def fetch_nearby_places(lat: float, lon: float, keyword: str, api_key: str):
 
         if "next_page_token" in data:
             next_token = data["next_page_token"]
-            # Wait a couple seconds to let the token become active
+            # short delay to let the token activate
             time.sleep(2)
             page_url = base_url + f"&pagetoken={next_token}"
         else:
@@ -95,7 +93,7 @@ def fetch_nearby_places(lat: float, lon: float, keyword: str, api_key: str):
 def search_places_top3_by_rating(lat: float, lon: float, keyword: str, target_business: str, api_key: str):
     """
     1) Fetch places around (lat, lon).
-    2) Sort them by rating (desc), then by reviews (desc).
+    2) Sort them by rating (desc), then by reviews (desc), then name (asc).
     3) Return the top 3 places, plus the rank of the target business if found.
     """
     all_results = fetch_nearby_places(lat, lon, keyword, api_key)
@@ -129,63 +127,23 @@ def search_places_top3_by_rating(lat: float, lon: float, keyword: str, target_bu
     structured.sort(key=lambda x: (-x["rating"], -x["reviews"], x["name"]))
 
     top_3 = structured[:3]
-
     rank = None
     client_details = None
     for idx, biz in enumerate(structured):
+        # match business by name substring
         if target_business.lower() in biz["name"].lower():
-            rank = idx + 1  # 1-based rank
+            rank = idx + 1
             client_details = biz
             break
 
     return rank, top_3, client_details
 
-def get_place_details(place_id: str, api_key: str):
-    """
-    Use Places Details API to get address, phone, website, etc.
-    """
-    details_url = (
-        "https://maps.googleapis.com/maps/api/place/details/json"
-        f"?place_id={place_id}&key={api_key}"
-    )
-    try:
-        resp = requests.get(details_url)
-        resp.raise_for_status()
-        result = resp.json().get("result", {})
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching place details: {e}")
-        return {}
-
-    return {
-        "address": result.get("formatted_address", ""),
-        "phone": result.get("formatted_phone_number", ""),
-        "website": result.get("website", ""),
-        "name": result.get("name", ""),
-        "rating": result.get("rating", "N/A"),
-        "reviews": result.get("user_ratings_total", "N/A"),
-    }
-
-def scrape_website(url: str, max_chars: int = 2000):
-    """
-    Attempt to scrape basic textual content from a website for GPT analysis.
-    """
-    if not url:
-        return ""
-
-    try:
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        texts = soup.find_all(["p", "h1", "h2", "h3", "h4", "li"], limit=None)
-        combined = " ".join(t.get_text(separator=" ", strip=True) for t in texts)
-        return combined[:max_chars]
-    except Exception:
-        return ""
-
 def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
     """
-    Creates a Scattermapbox-based heatmap of the rank results.
+    Creates a Scattermapbox-based heatmap of the "rating-based rank" results.
     """
+    import plotly.graph_objects as go
+
     fig = go.Figure()
 
     for _, row in df.iterrows():
@@ -203,7 +161,6 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
             marker_color = 'red'
             text_label = str(rank_val)
 
-        # Build hover text
         hover_text = "No competitor data."
         if row['top_3']:
             hover_items = []
@@ -244,22 +201,25 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
             zoom=12
         ),
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        title="Target Business Ranking Heatmap"
+        title="Rating-Based Coverage Heatmap"
     )
     return fig
 
 def generate_growth_report(df: pd.DataFrame, client_gbp: str):
     """
-    Summarize coverage: how many points rank top 3, top 10, or not found.
+    Summarize coverage in top 3, top 10, or not found (X).
     """
     total_points = len(df)
-    df_found = df.dropna(subset=['rank'])
+    df_found = df.dropna(subset=['rank'])  # points where business is found
 
     top_3_points = df_found[df_found['rank'] <= 3].shape[0]
     top_10_points = df_found[df_found['rank'] <= 10].shape[0]
 
-    pct_top_3 = (100.0 * top_3_points / total_points) if total_points else 0
-    pct_top_10 = (100.0 * top_10_points / total_points) if total_points else 0
+    pct_top_3 = 0
+    pct_top_10 = 0
+    if total_points > 0:
+        pct_top_3 = 100.0 * top_3_points / total_points
+        pct_top_10 = 100.0 * top_10_points / total_points
 
     average_rank = df_found['rank'].mean() if not df_found.empty else None
 
@@ -273,115 +233,51 @@ def generate_growth_report(df: pd.DataFrame, client_gbp: str):
     ]
     return "\n".join(lines)
 
-def analyze_competitors_with_gpt(client_gbp: str, competitor_details: list, client_info: dict):
-    """
-    AI-based competitor analysis & recommendations using GPT.
-    """
-    competitor_summaries = []
-    for comp in competitor_details:
-        summary_str = (
-            f"- Name: {comp.get('name', 'N/A')} "
-            f"(Rating: {comp.get('rating', 'N/A')}, {comp.get('reviews', '0')} reviews)\n"
-            f"  Address: {comp.get('address', 'N/A')}\n"
-            f"  Phone: {comp.get('phone', 'N/A')}\n"
-        )
-        if comp.get('website_content'):
-            snippet = comp.get('website_content')[:200]
-            summary_str += f"  Website Snippet: {snippet}...\n"
-        competitor_summaries.append(summary_str)
+# ------------------------------------------------------------
+# 2. STREAMLIT APP
+# ------------------------------------------------------------
 
-    competitor_text = "\n".join(competitor_summaries)
-
-    target_str = (
-        f"Target Business: {client_gbp}\n"
-        f"Rating: {client_info.get('rating', 'N/A')} | Reviews: {client_info.get('reviews', '0')}\n"
-    )
-
-    prompt = f"""
-You are an advanced local SEO consultant. Compare "{client_gbp}" to the competitors below:
-Target Business Data:
-{target_str}
-
-Competitors Data:
-{competitor_text}
-
-Provide a deep, data-driven, actionable analysis:
-1. Summarize how the target's rating/review count compares to each competitor.
-2. Evaluate each competitor's website snippet (if any) and how the target might improve or differentiate its own content.
-3. Provide specific local SEO recommendations (citations, GMB/GBP enhancements, content strategies) 
-   with metrics or evidence-based reasoning.
-4. Conclude with the top priorities for the target to outrank these competitors.
-    """
-
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a highly skilled local SEO consultant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=900
-        )
-        gpt_answer = response.choices[0].message.content
-        return gpt_answer.strip()
-    except Exception as e:
-        st.error(f"OpenAI API error: {e}")
-        return "Could not analyze competitors with ChatGPT."
-
-# -------------------------------------------------------------------------
-# 2. Streamlit Main App
-# -------------------------------------------------------------------------
 def main():
-    st.title("📍 Google Business Profile Rating-Based Heatmap & Analysis (Free Approach)")
+    st.title("Local SEO: Rating-Based Geo-Grid Tool")
+    st.write("""
+    This tool uses **Google Places Nearby Search** to collect local businesses near each grid point, 
+    sorts them by **star rating**, and shows where your business appears in that *rating-based* list.
+    
+    **Disclaimer**: This does **not** reflect the actual order of Google's map pack or local 3-Pack. 
+    It's simply a quick, free way to see how your business's star rating compares regionally.
+    """)
 
-    # 1. Prompt for API keys if not in session
-    if "openai_api_key" not in st.session_state or "places_api_key" not in st.session_state:
-        st.subheader("Enter Your API Keys (Optional for ChatGPT)")
-        openai_key_input = st.text_input("OpenAI API Key (sk-...)", type="password", help="Needed for GPT-based competitor analysis.")
+    # ---- 1) Ask for Google Maps/Places API key ----
+    if "places_api_key" not in st.session_state:
+        st.subheader("Enter Your Google Maps Places API Key")
         google_key_input = st.text_input("Google Maps/Places API Key", type="password")
-        if st.button("Save API Keys"):
+        if st.button("Save API Key"):
             if google_key_input:
                 st.session_state["places_api_key"] = google_key_input
-            if openai_key_input:
-                st.session_state["openai_api_key"] = openai_key_input
-            if not google_key_input:
-                st.warning("A Google Maps API key is required to fetch local data.")
+                st.experimental_rerun()
+            else:
+                st.warning("Please provide a valid API key to proceed.")
         st.stop()
 
-    # 2. Set up keys
     places_api_key = st.session_state["places_api_key"]
     gmaps = googlemaps.Client(key=places_api_key)
 
-    # OpenAI key is optional (only needed for competitor analysis)
-    if "openai_api_key" in st.session_state:
-        openai.api_key = st.session_state["openai_api_key"]
-
-    # 3. Initialize placeholders in session_state if not exist
-    if "competitor_place_ids" not in st.session_state:
-        st.session_state["competitor_place_ids"] = set()
-    if "client_info" not in st.session_state:
-        st.session_state["client_info"] = {}
-
-    # 4. Let user define a "snapshot_name" to track runs over time
-    snapshot_name = st.text_input("Snapshot Name", value=f"Snapshot_{int(time.time())}",
-                                  help="Label this scan so you can compare it later.")
-
-    # 5. Main user inputs
-    client_gbp = st.text_input("Target Business Name", "Starbucks")
-    keyword = st.text_input("Target Keyword", "Coffee Shop")
+    # ---- 2) Basic Input Fields ----
+    snapshot_name = st.text_input("Snapshot Name", value=f"Snapshot_{int(time.time())}")
+    client_gbp = st.text_input("Your Business Name (as on Google)", "Starbucks")
+    keyword = st.text_input("Keyword to Explore (e.g., 'Coffee Shop')", "Coffee Shop")
     business_address = st.text_input("Business Address", "Los Angeles, CA")
 
     grid_shape = st.selectbox("Grid Shape", ["Square", "Circle"])
-    radius = st.slider("Radius (miles)", 1, 20, 5)
+    radius = st.slider("Radius (miles)", 1, 20, 5, help="Approx. distance from center to boundary of the grid.")
     if grid_shape == "Square":
-        grid_size = st.slider("Square Grid Size", 3, 11, 5)
+        grid_size = st.slider("Square Grid Size", 3, 11, 5, help="Grid points = size * size.")
     else:
         grid_size = st.slider("Number of Circle Points", 8, 60, 25)
 
-    # 6. Button to Generate Heatmap
-    if st.button("🔍 Generate Heatmap"):
-        # A) Geocode the address
+    # ---- 3) Generate Heatmap Action ----
+    if st.button("🔍 Generate Rating-Based Heatmap"):
+        # Geocode the address
         try:
             geocode_result = gmaps.geocode(business_address)
             if geocode_result:
@@ -394,78 +290,79 @@ def main():
             center_lat, center_lon = None, None
 
         if not center_lat or not center_lon:
-            st.error("❌ Could not find the address. Please try again.")
+            st.error("❌ Could not find the address. Check spelling or try a more specific address.")
             return
-        st.success(f"Found Address: {business_address} (Lat: {center_lat:.5f}, Lon: {center_lon:.5f})")
 
-        # B) Generate Grid Points
+        st.success(f"Address Found: {business_address} (Lat: {center_lat:.5f}, Lon: {center_lon:.5f})")
+
+        # Generate the grid
         if grid_shape == "Square":
             grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
-            st.write(f"Using {len(grid_points)} grid points (Square: {grid_size}x{grid_size}).")
+            st.write(f"Using {len(grid_points)} grid points (Square: {grid_size} x {grid_size}).")
         else:
             grid_points = generate_circular_grid(center_lat, center_lon, radius, grid_size)
             st.write(f"Using {len(grid_points)} grid points (Circle).")
 
-        # C) For each grid point, get rank & top3
+        # Gather data
         grid_data = []
-        competitor_place_ids = set()
+        competitor_place_ids = set()  # we won't do anything with them now that GPT analysis is removed
         client_info_global = {}
+        
+        progress_bar = st.progress(0)
+        total_points = len(grid_points)
 
-        with st.spinner("Collecting data from Google Places API..."):
-            for lat, lon in grid_points:
-                rank, top_3, client_details = search_places_top3_by_rating(
-                    lat, lon, keyword, client_gbp, places_api_key
-                )
-                # If the target business is found, store details
-                if client_details is not None:
-                    client_info_global = client_details
+        for i, (lat, lon) in enumerate(grid_points):
+            rank, top_3, client_details = search_places_top3_by_rating(
+                lat, lon, keyword, client_gbp, places_api_key
+            )
+            if client_details is not None:
+                client_info_global = client_details
 
-                # Gather competitor place_ids from top_3
-                for c in top_3:
-                    competitor_place_ids.add(c["place_id"])
+            for c in top_3:
+                competitor_place_ids.add(c["place_id"])
 
-                grid_data.append({
-                    'latitude': lat,
-                    'longitude': lon,
-                    'rank': rank,
-                    'top_3': top_3,
-                })
+            grid_data.append({
+                'latitude': lat,
+                'longitude': lon,
+                'rank': rank,
+                'top_3': top_3,
+            })
 
-        # D) Update session_state
-        st.session_state["competitor_place_ids"] = competitor_place_ids
-        st.session_state["client_info"] = client_info_global
+            # Update progress bar
+            progress_bar.progress(int(((i+1)/total_points)*100))
 
-        # E) Create DataFrame
+        progress_bar.empty()
+
         df = pd.DataFrame(grid_data)
         df['snapshot_name'] = snapshot_name
         df['timestamp'] = pd.Timestamp.now()
 
-        # F) Plot Heatmap
+        # Plot the heatmap
         st.plotly_chart(create_heatmap(df, center_lat, center_lon), use_container_width=True)
 
-        # G) Show Growth Report
-        st.write("### Growth Report")
+        # Display a growth report
+        st.write("### Coverage Report (Rating-Based)")
         st.markdown(generate_growth_report(df, client_gbp))
 
-        # H) Save to local "ranking_history.csv"
-        history_file = "ranking_history.csv"
+        # Save to local CSV for future comparison
+        history_file = "rating_based_history.csv"
         if not os.path.isfile(history_file):
             df.to_csv(history_file, index=False)
         else:
             df.to_csv(history_file, mode='a', header=False, index=False)
-        st.success(f"Snapshot '{snapshot_name}' saved/updated in '{history_file}'.")
+        st.success(f"Snapshot '{snapshot_name}' saved in '{history_file}'.")
 
-        # I) Download button for this snapshot
+        # Download button for this data
         csv_data = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Download This Snapshot",
+            label="📥 Download Current Snapshot",
             data=csv_data,
-            file_name=f"{snapshot_name}_ranking_data.csv",
+            file_name=f"{snapshot_name}_rating_data.csv",
             mime="text/csv"
         )
 
-        # J) Detailed Grid Summary
-        st.write("### Detailed Grid Summary")
+        # Detailed listing
+        st.write("### Detailed Grid Point Results")
         for i, row in df.iterrows():
             rank_str = str(row['rank']) if row['rank'] else "X"
             top3_text = ""
@@ -477,61 +374,25 @@ def main():
                     f"Status: {comp.get('business_status', 'Unknown')}, "
                     f"Open Now: {comp.get('open_now', 'Unknown')}"
                 )
+
             st.markdown(f"""
 **Grid Point {i+1}**  
 - Coordinates: ({row['latitude']:.5f}, {row['longitude']:.5f})  
-- **{client_gbp}** Rank By Rating: {rank_str}  
-- Top 3 Best-Rated Competitors: {top3_text if top3_text else "None"}
+- **{client_gbp}** Rating-Based Rank: {rank_str if rank_str else "X"}  
+- Top 3 by Rating: {top3_text if top3_text else "N/A"}
 """)
 
-    # 7. Optional: ChatGPT Competitor Analysis
-    competitor_place_ids = st.session_state.get("competitor_place_ids", set())
-    client_info_global = st.session_state.get("client_info", {})
-    if competitor_place_ids:
-        if "openai_api_key" in st.session_state and st.session_state["openai_api_key"]:
-            if st.button("Analyze Competitors with ChatGPT"):
-                with st.spinner("Fetching competitor details & scraping websites..."):
-                    competitor_details_list = []
-                    for pid in competitor_place_ids:
-                        details = get_place_details(pid, places_api_key)
-                        website_content = ""
-                        if details.get('website'):
-                            website_content = scrape_website(details['website'], max_chars=2000)
-                        competitor_details_list.append({
-                            'name': details.get('name', ''),
-                            'address': details.get('address', ''),
-                            'phone': details.get('phone', ''),
-                            'rating': details.get('rating', 'N/A'),
-                            'reviews': details.get('reviews', '0'),
-                            'website': details.get('website', ''),
-                            'website_content': website_content
-                        })
-
-                    gpt_analysis = analyze_competitors_with_gpt(client_gbp, competitor_details_list, client_info_global)
-
-                st.write("### Competitor Comparison & Recommendations")
-                st.write(gpt_analysis)
-        else:
-            st.info("Enter an OpenAI API key if you want GPT competitor analysis.")
-    else:
-        st.info("No competitor data available. Generate Heatmap first.")
-
-    # 8. Compare to Past Snapshots
+    # ---- 4) Let user upload old data for comparisons ----
     st.write("---")
-    st.subheader("Compare to Past Snapshots")
-    uploaded_file = st.file_uploader("Upload a Past CSV Snapshot (e.g., from ranking_history.csv)", type=["csv"])
+    st.subheader("Compare Past Snapshots")
+    uploaded_file = st.file_uploader("Upload a previously saved CSV (e.g., rating_based_history.csv)", type=["csv"])
     if uploaded_file:
         old_data = pd.read_csv(uploaded_file)
-        st.write("**Uploaded Snapshot(s)**:", old_data['snapshot_name'].unique())
-
-        # You could implement merging or difference analysis here:
-        # For instance, let the user pick which snapshots to compare side by side.
-        # Example:
-        # unique_snaps = old_data['snapshot_name'].unique().tolist()
-        # pick1 = st.selectbox("Choose Snapshot #1", unique_snaps)
-        # pick2 = st.selectbox("Choose Snapshot #2", unique_snaps)
-        # Then compare data within those snapshots.
-        # This is left as an exercise depending on how you want to visualize differences.
+        st.write("**Found Snapshots**:", old_data['snapshot_name'].unique())
+        st.markdown("""
+        You can implement advanced comparison logic here if you want to show
+        how your rating-based rank coverage has changed over time.
+        """)
 
 if __name__ == "__main__":
     main()
