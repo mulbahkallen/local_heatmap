@@ -2,19 +2,19 @@ import streamlit as st
 import googlemaps
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import requests
 import time
 import os
 
-# ------------------------------------------------------------
+import plotly.graph_objects as go
+
+# -------------------------------------------------------------------
 # 1) HELPER FUNCTIONS
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
-    Generate a grid_size x grid_size grid of points within a square
-    bounding box of +/- radius_miles around (center_lat, center_lon).
+    Build a square grid of lat/lon around (center_lat, center_lon).
     """
     if grid_size < 1:
         return []
@@ -22,19 +22,18 @@ def generate_square_grid(center_lat: float, center_lon: float, radius_miles: flo
     lat_extent = radius_miles / 69.0
     lon_extent = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
 
-    lat_values = np.linspace(center_lat - lat_extent, center_lat + lat_extent, grid_size)
-    lon_values = np.linspace(center_lon - lon_extent, center_lon + lon_extent, grid_size)
+    lat_vals = np.linspace(center_lat - lat_extent, center_lat + lat_extent, grid_size)
+    lon_vals = np.linspace(center_lon - lon_extent, center_lon + lon_extent, grid_size)
 
-    grid_points = []
-    for lat in lat_values:
-        for lon in lon_values:
-            grid_points.append((lat, lon))
-
-    return grid_points
+    points = []
+    for lat in lat_vals:
+        for lon in lon_vals:
+            points.append((lat, lon))
+    return points
 
 def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: float, num_points: int = 25):
     """
-    Generate lat/lon coordinates in a circular pattern around (center_lat, center_lon).
+    Build a circular pattern of lat/lon around (center_lat, center_lon).
     """
     if num_points < 1:
         return []
@@ -42,137 +41,141 @@ def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: f
     lat_degs = radius_miles / 69.0
     lon_degs = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
 
-    grid_points = []
+    points = []
     for i in range(num_points):
         angle = 2.0 * np.pi * (i / num_points)
         lat_offset = lat_degs * np.sin(angle)
         lon_offset = lon_degs * np.cos(angle)
         lat = center_lat + lat_offset
         lon = center_lon + lon_offset
-        grid_points.append((lat, lon))
+        points.append((lat, lon))
+    return points
 
-    return grid_points
-
-def fetch_nearby_places(lat: float, lon: float, keyword: str, api_key: str):
+def reverse_geocode_city(lat: float, lon: float, gmaps_client) -> str:
     """
-    Collect up to 60 results from the Google Places Nearby Search,
-    sorted by distance (rankby=distance).
+    Reverse geocode (lat, lon) to approximate city or region name using Google Maps.
+    Return something like "Los Angeles, California" or empty string if not found.
     """
-    location = f"{lat},{lon}"
-    base_url = (
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-        f"?location={location}&keyword={keyword}"
-        f"&rankby=distance&key={api_key}"
-    )
+    try:
+        result = gmaps_client.reverse_geocode((lat, lon))
+        if not result:
+            return ""
+        locality = ""
+        admin_area = ""
 
-    all_results = []
-    page_url = base_url
-    for _ in range(3):
-        try:
-            resp = requests.get(page_url)
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Request error while fetching from Google Places API: {e}")
-            break
+        for component in result[0]["address_components"]:
+            if "locality" in component["types"]:
+                locality = component["long_name"]
+            if "administrative_area_level_1" in component["types"]:
+                admin_area = component["long_name"]
 
-        results = data.get("results", [])
-        all_results.extend(results)
+        # fallback to sublocalities or postal_town if needed
+        if not locality:
+            for component in result[0]["address_components"]:
+                if "postal_town" in component["types"] or "sublocality" in component["types"]:
+                    locality = component["long_name"]
+                    break
 
-        if "next_page_token" in data:
-            next_token = data["next_page_token"]
-            time.sleep(2)  # short delay for token activation
-            page_url = base_url + f"&pagetoken={next_token}"
+        # build "Locality, AdminArea"
+        if locality and admin_area:
+            return f"{locality},{admin_area}"
+        elif locality:
+            return locality
+        elif admin_area:
+            return admin_area
         else:
-            break
+            return result[0].get("formatted_address", "")
+    except:
+        return ""
 
-    return all_results
-
-def search_places_top3_by_rating(lat: float, lon: float, keyword: str, target_business: str, api_key: str):
+def serpstack_search(api_key: str, query: str, location: str, num: int = 10):
     """
-    1) Fetch places around (lat, lon).
-    2) Sort them by rating (desc), then reviews (desc), then name (asc).
-    3) Return the top 3 places, plus the rank of the target business if found.
+    Call serpstack's Google Search API with the given query + location.
+    Returns the JSON or None if error.
+    We only request the first 'num' results from page=1 for simplicity.
     """
-    all_results = fetch_nearby_places(lat, lon, keyword, api_key)
-    structured = []
+    base_url = "https://api.serpstack.com/search"
+    params = {
+        "access_key": api_key,
+        "query": query,
+        "location": location,
+        "output": "json",
+        "type": "web",
+        "num": num,        
+        "page": 1,         
+        "auto_location": 0 
+    }
 
-    for place in all_results:
-        name = place.get("name", "Unknown")
-        place_id = place.get("place_id", "")
-        rating = place.get("rating", 0)
-        reviews = place.get("user_ratings_total", 0)
-        types_ = place.get("types", [])
-        open_now = place.get("opening_hours", {}).get("open_now", None)
-        business_status = place.get("business_status", None)
+    try:
+        resp = requests.get(base_url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("success", True) is False:
+            # means there's an error per serpstack's doc
+            st.error(f"Serpstack error: {data.get('error', {}).get('info', 'Unknown')}")
+            return None
+        return data
+    except requests.exceptions.RequestException as e:
+        st.error(f"Request to serpstack failed: {e}")
+        return None
 
-        if rating is None:
-            rating = 0
-        if reviews is None:
-            reviews = 0
+def find_business_rank(api_json: dict, target_business: str) -> (int, list):
+    """
+    From the serpstack search JSON, find the rank of target_business in 'organic_results'.
+    Return (rank, topN), where rank is 1-based or None if not found,
+    and topN is the list of organic results themselves.
+    """
+    if not api_json or "organic_results" not in api_json:
+        return None, []
 
-        structured.append({
-            "place_id": place_id,
-            "name": name,
-            "rating": float(rating),
-            "reviews": int(reviews),
-            "types": types_,
-            "open_now": open_now,
-            "business_status": business_status
-        })
-
-    # Sort by rating desc, then reviews desc, then name asc
-    structured.sort(key=lambda x: (-x["rating"], -x["reviews"], x["name"]))
-
-    top_3 = structured[:3]
+    organic = api_json["organic_results"]
     rank = None
 
-    # find target business rank if name is found
-    for idx, biz in enumerate(structured):
-        if target_business.lower() in biz["name"].lower():
-            rank = idx + 1
+    for i, item in enumerate(organic, start=1):
+        title = item.get("title", "")
+        # naive substring match
+        if target_business.lower() in title.lower():
+            rank = i
             break
 
-    return rank, top_3
+    return rank, organic
 
-def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
+def create_scattermap(df: pd.DataFrame, center_lat: float, center_lon: float):
     """
-    Creates a Scattermap-based heatmap of the rating-based rank results.
-
-    Uses go.Scattermap (MapLibre-based), which replaces the older go.Scattermapbox.
+    Build a Plotly Scattermap for the SERP rank data (green/orange/red).
     """
     fig = go.Figure()
 
     for _, row in df.iterrows():
-        rank_val = row['rank']
+        rank_val = row["rank"]
         if rank_val is None:
-            marker_color = 'red'
+            marker_color = "red"
             text_label = "X"
         elif rank_val <= 3:
-            marker_color = 'green'
+            marker_color = "green"
             text_label = str(rank_val)
         elif rank_val <= 10:
-            marker_color = 'orange'
+            marker_color = "orange"
             text_label = str(rank_val)
         else:
-            marker_color = 'red'
+            marker_color = "red"
             text_label = str(rank_val)
 
-        # Build hover text from top_3
-        top_3 = row.get("top_3", [])
-        hover_text = "No competitor data."
-        if top_3:
-            lines = []
-            for i, biz in enumerate(top_3, start=1):
-                lines.append(f"{i}. {biz['name']} ({biz['rating']}⭐, {biz['reviews']} reviews)")
-            hover_text = "\n".join(lines)
+        # build hover text from topN
+        topN = row["organic_results"] or []
+        if topN:
+            snippet_lines = []
+            for i, item in enumerate(topN[:3], start=1):  # show top 3 in hover
+                snippet_lines.append(f"{i}. {item.get('title', '')}")
+            hover_text = "\n".join(snippet_lines)
+        else:
+            hover_text = "No results or API error."
 
-        # Instead of Scattermapbox, use Scattermap
         fig.add_trace(
             go.Scattermap(
-                lat=[row['latitude']],
-                lon=[row['longitude']],
-                mode='markers+text',
+                lat=[row["latitude"]],
+                lon=[row["longitude"]],
+                mode="markers+text",
                 marker=dict(size=20, color=marker_color),
                 text=[text_label],
                 textposition="middle center",
@@ -186,195 +189,212 @@ def create_heatmap(df: pd.DataFrame, center_lat: float, center_lon: float):
     fig.update_layout(
         mapbox_style="open-street-map",
         mapbox_center={"lat": center_lat, "lon": center_lon},
-        mapbox_zoom=12,
-        margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        title="Rating-Based Coverage Heatmap"
+        mapbox_zoom=9,
+        margin=dict(r=0, t=0, l=0, b=0),
+        title="SERPstack Local Approx Heatmap"
     )
     return fig
 
-def generate_growth_report(df: pd.DataFrame, business_name: str):
+def generate_report(df: pd.DataFrame, target_business: str):
     """
-    Summarize how many grid points rank top 3, top 10, or not found.
+    Summarize coverage in top3, top10, etc.
     """
-    total_points = len(df)
-    df_found = df.dropna(subset=['rank'])
+    total_pts = len(df)
+    df_found = df.dropna(subset=["rank"])
 
-    top_3_points = df_found[df_found['rank'] <= 3].shape[0]
-    top_10_points = df_found[df_found['rank'] <= 10].shape[0]
+    top3 = df_found[df_found["rank"] <= 3].shape[0]
+    top10 = df_found[df_found["rank"] <= 10].shape[0]
+    pct_top3 = (100*top3/total_pts) if total_pts else 0
+    pct_top10 = (100*top10/total_pts) if total_pts else 0
 
-    pct_top_3 = 0
-    pct_top_10 = 0
-    if total_points > 0:
-        pct_top_3 = 100.0 * top_3_points / total_points
-        pct_top_10 = 100.0 * top_10_points / total_points
-
-    average_rank = df_found['rank'].mean() if not df_found.empty else None
+    avg_rank = df_found["rank"].mean() if not df_found.empty else None
 
     lines = [
-        f"**{business_name} Coverage Report**",
-        f"- **Total Grid Points:** {total_points}",
-        f"- **Business Found:** {len(df_found)} points",
-        f"- **In Top 3:** {top_3_points} ({pct_top_3:.1f}% of total)",
-        f"- **In Top 10:** {top_10_points} ({pct_top_10:.1f}% of total)",
+        f"**{target_business} SERP Coverage**",
+        f"- **Total Grid Points:** {total_pts}",
+        f"- **Found at:** {len(df_found)} points",
+        f"- **In Top 3:** {top3} ({pct_top3:.1f}%)",
+        f"- **In Top 10:** {top10} ({pct_top10:.1f}%)"
     ]
-    if average_rank is not None:
-        lines.append(f"- **Average Rank (where found):** {average_rank:.2f}")
+    if avg_rank is not None:
+        lines.append(f"- **Average Rank (where found):** {avg_rank:.2f}")
     else:
-        lines.append("- **Average Rank:** N/A (Business not found in any grid point)")
+        lines.append("- **Average Rank:** N/A (Not found anywhere)")
 
     return "\n".join(lines)
 
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
 # 2) STREAMLIT APP
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
 
 def main():
-    st.title("Local SEO: Rating-Based Heatmap (No ChatGPT, Updated)")
+    st.title("Local SERP Heatmap via Serpstack (Approx)")
 
     st.write("""
-    This app uses the **Google Places Nearby Search API** (free within certain limits) to see how your
-    business compares by **star rating** around a specific address.  
-    - **Disclaimer**: This does **not** reflect actual Local 3-Pack ranking.  
-    - Instead, it shows how your star rating stacks up against nearby places, 
-      re-sorted by rating, for each grid point.
+    This tool uses your **Serpstack** API (paid/freemium) + Google Geocoding:
+    1. We geocode a center address to get (lat, lon).
+    2. Build a geo-grid around that center.
+    3. Reverse-geocode each point to an approximate city name (Serpstack does not accept raw lat/lon).
+    4. Call Serpstack's "Google Search" endpoint with `query` and `location=CityName`.
+    5. Check where your business name appears in the organic results (if at all).
+    
+    **Disclaimer**:
+    - Because Serpstack does not accept raw lat/lon, each point's "location" is approximate (city-level).
+    - For truly lat/lon-precise local SERP data, you'd need advanced or alternative solutions.
     """)
 
-    # 1. Ask for Google Maps/Places API key if not in session
-    if "places_api_key" not in st.session_state:
-        st.subheader("Enter Your Google Maps Places API Key")
-        st.write("Create or retrieve an API key from https://console.cloud.google.com/apis/credentials")
-        google_key_input = st.text_input("Google Maps/Places API Key", type="password")
-        if st.button("Save API Key"):
-            if google_key_input:
-                # store the key in session_state
-                st.session_state["places_api_key"] = google_key_input
-                st.warning("Your API Key was saved. Please refresh or rerun the app to continue.")
+    # 1) serpstack key
+    st.subheader("Enter Serpstack API Key")
+    if "serpstack_key" not in st.session_state:
+        serp_key_input = st.text_input("Serpstack Access Key", type="password",
+                                       help="Sign up at serpstack.com to get an API key.")
+        if st.button("Save Serpstack Key"):
+            if serp_key_input:
+                st.session_state["serpstack_key"] = serp_key_input
+                st.warning("Serpstack key saved! Please reload or rerun to proceed.")
             else:
-                st.warning("Please provide a valid API key.")
+                st.warning("Please provide a valid serpstack key.")
         st.stop()
 
-    # 2. Basic user inputs
-    snapshot_name = st.text_input("Snapshot Name/Label", value=f"rating_snapshot_{int(time.time())}",
-                                  help="Used to label this run in the CSV history.")
-    business_name = st.text_input("Your Business Name (as it appears in Google)", help="Ex: Starbucks, ACME Plumbing, etc.")
-    keyword = st.text_input("Keyword to Search For", value="Coffee Shop",
-                            help="E.g. 'Coffee Shop', 'Plumber', 'Pizza near me'")
+    serpstack_key = st.session_state["serpstack_key"]
 
-    business_address = st.text_input("Enter a Full Address or City for Center", value="Los Angeles, CA",
-                                     help="We will geocode this to find the center lat/lon of your grid.")
+    # 2) Google Maps key for geocoding
+    st.subheader("Enter Google Maps API Key (for geocoding)")
+    if "google_maps_key" not in st.session_state:
+        google_key_input = st.text_input("Google Maps/Places API Key", type="password")
+        if st.button("Save Google Maps Key"):
+            if google_key_input:
+                st.session_state["google_maps_key"] = google_key_input
+                st.warning("Google Maps key saved! Please reload or rerun to proceed.")
+            else:
+                st.warning("Please provide a valid Google Maps key.")
+        st.stop()
 
+    gmaps_client = googlemaps.Client(key=st.session_state["google_maps_key"])
+
+    # 3) Basic inputs
+    snapshot_name = st.text_input("Snapshot Name", value=f"serpstack_snapshot_{int(time.time())}",
+                                  help="Used to label your scan in the CSV.")
+    target_business = st.text_input("Target Business Name", value="Starbucks",
+                                    help="Substring match in the SERP result's title.")
+    keyword = st.text_input("Keyword to Search", value="Coffee Shop",
+                            help="We'll pass this to serpstack as 'query'.")
+    center_address = st.text_input("Center Address/City", value="Los Angeles, CA",
+                                   help="We geocode this to get the center lat/lon.")
     grid_shape = st.selectbox("Grid Shape", ["Square", "Circle"])
-    radius = st.slider("Radius (Miles)", 1, 20, 5, help="Approx distance from center address to edge of your grid.")
+    radius = st.slider("Radius (Miles)", 1, 20, 5)
     if grid_shape == "Square":
-        grid_size = st.slider("Square Grid Size", 3, 11, 5, help="Number of points along each side (Grid=5x5=25).")
+        grid_size = st.slider("Square Grid Size", 3, 11, 5, help="5 => 25 total points.")
     else:
-        grid_size = st.slider("Number of Circle Points", 8, 60, 25, help="Points on the perimeter of the circle.")
+        grid_size = st.slider("Circle Points", 8, 60, 25)
 
-    # 3. Generate Heatmap button
-    if st.button("Generate Rating Heatmap"):
+    if st.button("Run Serpstack Analysis"):
+        # A) Forward geocode center
         try:
-            # Geocode center
-            gmaps_client = googlemaps.Client(key=st.session_state["places_api_key"])
-            geocode_result = gmaps_client.geocode(business_address)
+            geocode_result = gmaps_client.geocode(center_address)
             if geocode_result:
-                center_lat = geocode_result[0]['geometry']['location']['lat']
-                center_lon = geocode_result[0]['geometry']['location']['lng']
+                center_lat = geocode_result[0]["geometry"]["location"]["lat"]
+                center_lon = geocode_result[0]["geometry"]["location"]["lng"]
             else:
                 center_lat, center_lon = None, None
         except Exception as e:
-            st.error(f"Geocoding error: {e}")
+            st.error(f"Error geocoding center address: {e}")
             center_lat, center_lon = None, None
 
         if not center_lat or not center_lon:
-            st.error("Failed to geocode the address. Please try a more specific address.")
+            st.error("Could not geocode center address. Try again.")
             return
 
-        st.success(f"Address Found: {business_address} → (Lat: {center_lat:.5f}, Lon: {center_lon:.5f})")
+        st.write(f"**Center**: {center_address} → (Lat: {center_lat:.5f}, Lon: {center_lon:.5f})")
 
-        # Build the grid
+        # B) Generate grid
         if grid_shape == "Square":
             grid_points = generate_square_grid(center_lat, center_lon, radius, grid_size)
-            st.write(f"Using a {grid_size}x{grid_size} square = {len(grid_points)} total points.")
+            st.write(f"**Generated** {len(grid_points)} points in a {grid_size}×{grid_size} square.")
         else:
             grid_points = generate_circular_grid(center_lat, center_lon, radius, grid_size)
-            st.write(f"Using a circular pattern with {len(grid_points)} total points.")
+            st.write(f"**Generated** {len(grid_points)} points in a circle pattern.")
 
-        # Gather data
-        df_data = []
-        progress = st.progress(0)
+        # C) For each point -> reverse geocode -> serpstack -> find rank
+        df_rows = []
+        progress_bar = st.progress(0)
+        total_pts = len(grid_points)
 
         for i, (lat, lon) in enumerate(grid_points, start=1):
-            rank, top_3 = search_places_top3_by_rating(
-                lat, lon, keyword, business_name, st.session_state["places_api_key"]
-            )
-            df_data.append({
+            # Reverse geocode to city
+            city_str = reverse_geocode_city(lat, lon, gmaps_client)
+            if not city_str:
+                rank = None
+                organic = []
+            else:
+                # call serpstack
+                data = serpstack_search(serpstack_key, keyword, city_str)
+                if not data:
+                    rank = None
+                    organic = []
+                else:
+                    rank, organic = find_business_rank(data, target_business)
+
+            df_rows.append({
                 "latitude": lat,
                 "longitude": lon,
+                "city_used": city_str,
                 "rank": rank,
-                "top_3": top_3
+                "organic_results": organic
             })
-            progress.progress(int((i / len(grid_points)) * 100))
 
-        progress.empty()
+            progress_bar.progress(int((i / total_pts) * 100))
+            time.sleep(0.2)  # slight delay to avoid spamming
 
-        # Create DataFrame
-        df = pd.DataFrame(df_data)
+        progress_bar.empty()
+
+        df = pd.DataFrame(df_rows)
         df["snapshot_name"] = snapshot_name
         df["timestamp"] = pd.Timestamp.now()
 
-        # Plot the heatmap
-        fig = create_heatmap(df, center_lat, center_lon)
-        st.plotly_chart(fig, use_container_width=True)
+        # D) Plot
+        st.plotly_chart(create_scattermap(df, center_lat, center_lon), use_container_width=True)
 
-        # Show summary stats
-        st.write("### Coverage Report")
-        st.markdown(generate_growth_report(df, business_name))
+        # E) Coverage Report
+        st.write("### SERP Coverage Report")
+        st.markdown(generate_report(df, target_business))
 
-        # Save to local CSV
-        history_file = "rating_based_history.csv"
+        # F) Save CSV
+        history_file = "serpstack_history.csv"
         if not os.path.isfile(history_file):
             df.to_csv(history_file, index=False)
         else:
-            df.to_csv(history_file, mode='a', header=False, index=False)
-        st.success(f"Snapshot '{snapshot_name}' appended to '{history_file}'.")
+            df.to_csv(history_file, mode="a", header=False, index=False)
+        st.success(f"Saved snapshot '{snapshot_name}' → {history_file}.")
 
-        # Download current snapshot
-        csv_data = df.to_csv(index=False).encode('utf-8')
+        # G) Download
+        csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="Download This Snapshot (CSV)",
+            label="Download Snapshot as CSV",
             data=csv_data,
-            file_name=f"{snapshot_name}_rating_data.csv",
+            file_name=f"{snapshot_name}_serpstack.csv",
             mime="text/csv"
         )
 
-        # Detailed listing
-        st.write("### Detailed Results Per Grid Point")
+        # H) Detailed Results
+        st.write("### Detailed Per-Point Data")
         for idx, row in df.iterrows():
             rank_str = row["rank"] if row["rank"] is not None else "X"
-            top3_details = row["top_3"]
-            comp_list = ""
-            for c_idx, comp in enumerate(top3_details, start=1):
-                comp_list += (f"\n   {c_idx}. {comp['name']} "
-                              f"(Rating: {comp['rating']}, {comp['reviews']} reviews)")
-
             st.markdown(f"""
 **Grid Point {idx+1}**  
-- Coordinates: (Lat: {row['latitude']:.5f}, Lon: {row['longitude']:.5f})  
-- **{business_name}** Rank: {rank_str}  
-- Top 3 by Rating: {comp_list if comp_list else "None"}
+- **Coords**: (Lat: {row['latitude']:.4f}, Lon: {row['longitude']:.4f})  
+- **City**: {row['city_used']}  
+- **Rank**: {rank_str}
 """)
 
-    # Optionally, let user upload old CSV for comparisons
+    # Past Snapshots
     st.write("---")
-    st.subheader("Compare Past Snapshots")
-    uploaded_file = st.file_uploader("Upload a previously saved CSV (e.g. rating_based_history.csv)", type=["csv"])
-    if uploaded_file:
-        old_data = pd.read_csv(uploaded_file)
-        st.write("Found Snapshots:", old_data['snapshot_name'].unique())
-        st.markdown("""
-        Implement custom difference or side-by-side comparisons here if desired.
-        """)
-
+    st.subheader("Compare Old Snapshots")
+    uploaded = st.file_uploader("Upload serpstack_history CSV", type=["csv"])
+    if uploaded:
+        old_df = pd.read_csv(uploaded)
+        st.write("Snapshots found:", old_df["snapshot_name"].unique())
+        st.markdown("Implement side-by-side or difference logic here if desired.")
 
 if __name__ == "__main__":
     main()
