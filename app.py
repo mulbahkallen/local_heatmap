@@ -237,10 +237,6 @@ def main():
     3. Reverse-geocode each point to an approximate city name (Serpstack does not accept raw lat/lon).
     4. Call Serpstack's "Google Search" endpoint with `query` and `location=CityName`.
     5. Check where your business name appears in the organic results (if at all).
-    
-    **Disclaimer**:
-    - Because Serpstack does not accept raw lat/lon, each point's "location" is approximate (city-level).
-    - For truly lat/lon-precise local SERP data, you'd need advanced or alternative solutions.
     """)
 
     # 1) serpstack key
