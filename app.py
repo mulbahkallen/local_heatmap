@@ -7,16 +7,29 @@ import time
 import os
 import plotly.graph_objects as go
 
-# ----------------------------------------------
+from requests.adapters import HTTPAdapter, Retry
+
+# Create a global Session for retries/timeouts
+session = requests.Session()
+retries = Retry(
+    total=3,               # up to 3 retry attempts
+    backoff_factor=1,      # 1s, 2s, 4s sleep between retries
+    status_forcelist=[429, 500, 502, 503, 504]  # retry on these HTTP status
+)
+session.mount('https://', HTTPAdapter(max_retries=retries))
+
+# --------------------------------------------------------
 # 1) HELPER FUNCTIONS
-# ----------------------------------------------
+# --------------------------------------------------------
 
 def generate_square_grid(center_lat: float, center_lon: float, radius_miles: float, grid_size: int = 5):
     """
-    Generate a square grid of lat/lon around (center_lat, center_lon).
+    Generate a square grid of lat/lon around (center_lat, center_lon)
+    within +/- radius_miles.
     """
     if grid_size < 1:
         return []
+
     lat_extent = radius_miles / 69.0
     lon_extent = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
 
@@ -35,6 +48,7 @@ def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: f
     """
     if num_points < 1:
         return []
+
     lat_degs = radius_miles / 69.0
     lon_degs = radius_miles / (69.0 * np.cos(np.radians(center_lat)))
 
@@ -46,17 +60,17 @@ def generate_circular_grid(center_lat: float, center_lon: float, radius_miles: f
         lat = center_lat + lat_offset
         lon = center_lon + lon_offset
         points.append((lat, lon))
+
     return points
 
 def reverse_geocode_city(lat: float, lon: float, gmaps_client) -> str:
     """
-    Reverse geocode lat/lon to approximate city or region name (for serpstack location).
+    Reverse geocode lat/lon to an approximate city or region string for Serpstack.
     """
     try:
         results = gmaps_client.reverse_geocode((lat, lon))
         if not results:
             return ""
-        # Attempt to extract "locality" and "administrative_area_level_1"
         locality = ""
         admin_area = ""
         for comp in results[0].get("address_components", []):
@@ -65,7 +79,7 @@ def reverse_geocode_city(lat: float, lon: float, gmaps_client) -> str:
             if "administrative_area_level_1" in comp["types"]:
                 admin_area = comp["long_name"]
 
-        # fallback if needed
+        # fallback if no 'locality' found
         if not locality:
             for comp in results[0].get("address_components", []):
                 if "postal_town" in comp["types"] or "sublocality" in comp["types"]:
@@ -85,8 +99,8 @@ def reverse_geocode_city(lat: float, lon: float, gmaps_client) -> str:
 
 def serpstack_search(api_key: str, query: str, location: str, num: int = 10):
     """
-    Query serpstack with the given search query + city location.
-    Returns JSON or None on error.
+    Query serpstack for 'query' + city-level 'location'.
+    Uses a global 'session' with retries. 30s timeout.
     """
     base_url = "https://api.serpstack.com/search"
     params = {
@@ -100,7 +114,7 @@ def serpstack_search(api_key: str, query: str, location: str, num: int = 10):
         "auto_location": 0
     }
     try:
-        resp = requests.get(base_url, params=params, timeout=60)
+        resp = session.get(base_url, params=params, timeout=30)  # 30s timeout
         resp.raise_for_status()
         data = resp.json()
         if data.get("success", True) is False:
@@ -113,8 +127,8 @@ def serpstack_search(api_key: str, query: str, location: str, num: int = 10):
 
 def find_map_pack_rank(data: dict, gbp_name: str):
     """
-    Parse serpstack's local_results to find the GBP name in the 'title'.
-    Return 1-based rank or None if not found.
+    Check 'local_results' in Serpstack for a matching GBP name in 'title'.
+    Return 1-based rank or None.
     """
     if "local_results" not in data:
         return None
@@ -127,8 +141,8 @@ def find_map_pack_rank(data: dict, gbp_name: str):
 
 def find_organic_rank_by_url(data: dict, domain_name: str):
     """
-    Parse serpstack's organic_results, matching 'domain_name' substring in each result's 'url'.
-    Return 1-based rank or None if not found.
+    Check 'organic_results' in Serpstack for matching domain in 'url'.
+    Return 1-based rank or None.
     """
     if "organic_results" not in data:
         return None
@@ -141,14 +155,14 @@ def find_organic_rank_by_url(data: dict, domain_name: str):
 
 def create_scattermap(df: pd.DataFrame, center_lat: float, center_lon: float, rank_type: str):
     """
-    Build a plotly Scattermap. 
-    rank_type can be 'map_pack_rank' or 'organic_rank'.
+    Plot a Scattermap of either map_pack_rank or organic_rank.
     """
     fig = go.Figure()
 
     for _, row in df.iterrows():
         rank_val = row[rank_type]
         if pd.isna(rank_val):
+            # not found
             marker_color = "red"
             text_label = "X"
         else:
@@ -181,9 +195,9 @@ def create_scattermap(df: pd.DataFrame, center_lat: float, center_lon: float, ra
     fig.update_layout(
         mapbox_style="open-street-map",
         mapbox_center={"lat": center_lat, "lon": center_lon},
-        mapbox_zoom=9,
+        mapbox_zoom=10,
         margin=dict(r=0, t=0, l=0, b=0),
-        title=f"Serpstack Heatmap - {rank_type}"
+        title=f"SERPstack Heatmap - {rank_type}"
     )
     return fig
 
@@ -197,8 +211,8 @@ def generate_coverage_report(df: pd.DataFrame, column: str, label: str):
     top3 = df_found[df_found[column] <= 3].shape[0]
     top10 = df_found[df_found[column] <= 10].shape[0]
 
-    pct_top3 = (100 * top3 / total_pts) if total_pts else 0
-    pct_top10 = (100 * top10 / total_pts) if total_pts else 0
+    pct_top3 = (100.0 * top3 / total_pts) if total_pts else 0
+    pct_top10 = (100.0 * top10 / total_pts) if total_pts else 0
 
     avg_rank = df_found[column].mean() if not df_found.empty else None
 
@@ -216,17 +230,28 @@ def generate_coverage_report(df: pd.DataFrame, column: str, label: str):
 
     return "\n".join(lines)
 
-# ----------------------------------------------
+# --------------------------------------------------------
 # 2) STREAMLIT APP
-# ----------------------------------------------
+# --------------------------------------------------------
 
 def main():
     st.title("SERPstack Geo-Grid: Map Pack + Organic URL Matching")
 
     st.write("""
-    This app uses **Serpstack** for SERP data and **Google Geocoding** for location data. 
-    - We check **Map Pack** (local_results) by matching your **Google Business Profile** name. 
-    - We check **Organic** results by matching your **website domain** in the 'url' field.
+    **Instructions**:
+    1. Provide a Serpstack API key (from your serpstack.com account).
+    2. Provide a Google Maps API key for geocoding.
+    3. Enter your **Google Business Profile Name** for local (map pack) matching.
+    4. Enter your **Website Domain** (e.g. "example.com") for organic matching.
+    5. Enter the **address of your business** -- we'll center the grid on this exact location.
+    6. Choose grid shape + radius, then click "**Run Serpstack Analysis**."
+
+    This code:
+    - Builds a grid of coordinates around your business address.
+    - Reverse-geocodes each point to get a city name for Serpstack.
+    - Queries Serpstack for "keyword + city" to retrieve map pack + organic results.
+    - Ranks your local pack presence by GBP name match, and your organic presence by domain match.
+    - Lets you pick which rank to display on the map.
     """)
 
     # 1) serpstack key
@@ -262,53 +287,53 @@ def main():
     gbp_name = st.text_input("Google Business Profile Name", value="Starbucks",
                              help="We'll look for this name in local_results 'title'.")
     domain_name = st.text_input("Website Domain for Organic", value="starbucks.com",
-                                help="We'll match this substring in the organic 'url' field.")
+                                help="We'll match this substring in the 'url' field of organic results.")
     search_keyword = st.text_input("Keyword to Search", value="coffee shop")
-    center_addr = st.text_input("Center Address/City", value="Los Angeles, CA")
+    business_address = st.text_input("Business Address", value="Los Angeles, CA",
+                                     help="We'll use this to geocode the center of the grid (your business location).")
 
     grid_shape = st.selectbox("Grid Shape", ["Square", "Circle"])
-    radius_mi = st.slider("Radius (miles)", 1, 20, 5)
+    radius_miles = st.slider("Radius (miles)", 1, 20, 5)
     if grid_shape == "Square":
-        grid_sz = st.slider("Square Grid Size", 3, 11, 5)
+        grid_size = st.slider("Square Grid Size", 3, 11, 5)
     else:
-        grid_sz = st.slider("Circle Points", 8, 60, 25)
+        grid_size = st.slider("Circle Points", 8, 60, 25)
 
     if st.button("Run Serpstack Analysis"):
-        # A) Geocode center
+        # A) Geocode the business address
         try:
-            geo_res = gmaps.geocode(center_addr)
+            geo_res = gmaps.geocode(business_address)
             if geo_res:
                 center_lat = geo_res[0]["geometry"]["location"]["lat"]
                 center_lon = geo_res[0]["geometry"]["location"]["lng"]
             else:
                 center_lat, center_lon = None, None
         except Exception as e:
-            st.error(f"Error geocoding center address: {e}")
+            st.error(f"Error geocoding business address: {e}")
             center_lat, center_lon = None, None
 
         if not center_lat or not center_lon:
-            st.error("Could not geocode center address. Try again.")
+            st.error("Could not geocode the business address. Try again.")
             return
 
-        st.write(f"**Center**: {center_addr} → (Lat: {center_lat:.4f}, Lon: {center_lon:.4f})")
+        st.write(f"**Business Coordinates**: {business_address} → (Lat: {center_lat:.4f}, Lon: {center_lon:.4f})")
 
         # B) Generate grid
         if grid_shape == "Square":
-            grid_points = generate_square_grid(center_lat, center_lon, radius_mi, grid_sz)
-            st.write(f"Generated {len(grid_points)} points in a {grid_sz}x{grid_sz} square.")
+            grid_points = generate_square_grid(center_lat, center_lon, radius_miles, grid_size)
+            st.write(f"Generated {len(grid_points)} points in a {grid_size}x{grid_size} square grid.")
         else:
-            grid_points = generate_circular_grid(center_lat, center_lon, radius_mi, grid_sz)
+            grid_points = generate_circular_grid(center_lat, center_lon, radius_miles, grid_size)
             st.write(f"Generated {len(grid_points)} points in a circle pattern ({len(grid_points)}).")
 
-        # C) For each point -> city -> serpstack -> parse map pack & organic
+        # C) For each point -> city -> serpstack -> parse local & organic
         rows = []
-        bar = st.progress(0)
-        total = len(grid_points)
+        progress_bar = st.progress(0)
+        total_pts = len(grid_points)
 
         for i, (lat, lon) in enumerate(grid_points, start=1):
             city_str = reverse_geocode_city(lat, lon, gmaps)
             if not city_str:
-                # no city found
                 map_rank = None
                 org_rank = None
             else:
@@ -327,51 +352,54 @@ def main():
                 "map_pack_rank": map_rank,
                 "organic_rank": org_rank
             })
-            bar.progress(int((i / total) * 100))
-            time.sleep(0.2)
 
-        bar.empty()
+            progress_bar.progress(int((i / total_pts) * 100))
+            time.sleep(1)  # 1-second delay between calls
+
+        progress_bar.empty()
 
         df = pd.DataFrame(rows)
         df["snapshot_name"] = snapshot_name
         df["timestamp"] = pd.Timestamp.now()
 
-        # D) Let user pick which rank to visualize
-        rank_choice = st.selectbox("Which rank do you want to plot?", ["map_pack_rank", "organic_rank"])
+        # D) Choose rank to plot
+        rank_choice = st.selectbox("Which rank do you want to plot on the heatmap?",
+                                   ["map_pack_rank", "organic_rank"])
         fig = create_scattermap(df, center_lat, center_lon, rank_choice)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Show coverage for both
+        # E) Coverage reports
         st.write("### Map Pack Coverage")
         st.markdown(generate_coverage_report(df, "map_pack_rank", label="Map Pack Rank"))
 
         st.write("### Organic Coverage")
-        st.markdown(generate_coverage_report(df, "organic_rank", label="Organic URL Match"))
+        st.markdown(generate_coverage_report(df, "organic_rank", label="Organic Domain Match"))
 
-        # E) Save CSV
-        hist_file = "serpstack_map_organic.csv"
-        if not os.path.isfile(hist_file):
-            df.to_csv(hist_file, index=False)
+        # F) Save CSV
+        history_file = "serpstack_map_organic.csv"
+        if not os.path.isfile(history_file):
+            df.to_csv(history_file, index=False)
         else:
-            df.to_csv(hist_file, mode='a', header=False, index=False)
-        st.success(f"Snapshot '{snapshot_name}' saved to '{hist_file}'.")
+            df.to_csv(history_file, mode='a', header=False, index=False)
+        st.success(f"Snapshot '{snapshot_name}' saved to '{history_file}'.")
 
-        # F) Download
+        # G) Download
         csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="Download Snapshot as CSV",
+            label="Download This Snapshot as CSV",
             data=csv_data,
             file_name=f"{snapshot_name}_serpstack_map_organic.csv",
             mime="text/csv"
         )
 
-        # G) Detailed Rows
-        st.write("### Detailed Results")
+        # H) Detailed listing
+        st.write("### Detailed Results Per Grid Point")
         for idx, row in df.iterrows():
-            mp = row["map_pack_rank"]
-            mp_str = str(int(mp)) if pd.notna(mp) else "X"
-            org = row["organic_rank"]
-            org_str = str(int(org)) if pd.notna(org) else "X"
+            mp_rank = row["map_pack_rank"]
+            org_rank = row["organic_rank"]
+
+            mp_str = str(int(mp_rank)) if pd.notna(mp_rank) else "X"
+            org_str = str(int(org_rank)) if pd.notna(org_rank) else "X"
 
             st.markdown(f"""
 **Grid Point {idx+1}**  
@@ -384,11 +412,11 @@ def main():
     # Compare old snapshots
     st.write("---")
     st.subheader("Compare Old Snapshots")
-    uploaded_file = st.file_uploader("Upload a previously saved CSV (serpstack_map_organic.csv)", type=["csv"])
+    uploaded_file = st.file_uploader("Upload a previously saved CSV", type=["csv"])
     if uploaded_file:
-        old_df = pd.read_csv(uploaded_file)
-        st.write("Found Snapshots:", old_df["snapshot_name"].unique())
-        st.markdown("You could implement side-by-side or difference mapping here.")
+        old_data = pd.read_csv(uploaded_file)
+        st.write("Found Snapshots:", old_data["snapshot_name"].unique())
+        st.markdown("Implement side-by-side or difference logic here if desired.")
 
 if __name__ == "__main__":
     main()
