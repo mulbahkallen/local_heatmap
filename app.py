@@ -100,7 +100,7 @@ def serpstack_search(api_key: str, query: str, location: str, num: int = 10):
         "auto_location": 0
     }
     try:
-        resp = requests.get(base_url, params=params, timeout=10)
+        resp = requests.get(base_url, params=params, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         if data.get("success", True) is False:
